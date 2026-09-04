@@ -2558,7 +2558,16 @@
   }
   window.App = App;
 
-  init();
+  // Wait for the document to be fully parsed before starting. This guarantees the
+  // Firebase bridge <script type="module"> above (which is always deferred by
+  // browsers until after parsing completes) has already run and set up
+  // window.ShiftFloorDBReady — otherwise init() can race ahead of it and wrongly
+  // conclude Firebase is unavailable.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
 })();
 </script>
 </body>
