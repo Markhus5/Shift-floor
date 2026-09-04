@@ -1,0 +1,2407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shift Floor</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<style>
+  :root{
+    --bg:#F2F5F0;
+    --surface:#FFFFFF;
+    --surface-2:#E8EDE3;
+    --ink:#151C18;
+    --muted:#5D6B61;
+    --line:#D7DED2;
+    --accent:#0E7A63;
+    --accent-ink:#FFFFFF;
+    --accent-soft:#DCEEE7;
+    --warn:#B8721A;
+    --warn-soft:#F6E5CC;
+    --bad:#B3402A;
+    --bad-soft:#F6DAD3;
+    --good:#1C7A50;
+    --good-soft:#DCEFE1;
+    --shadow: 0 1px 2px rgba(21,28,24,.06), 0 6px 16px rgba(21,28,24,.07);
+    --radius: 14px;
+    --font-display:'Barlow Semi Condensed','Arial Narrow',sans-serif;
+    --font-body:'Public Sans',-apple-system,BlinkMacSystemFont,sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0F1613;
+      --surface:#182620;
+      --surface-2:#1E2E27;
+      --ink:#E8F0EA;
+      --muted:#94AB9E;
+      --line:#293A31;
+      --accent:#41BF9C;
+      --accent-ink:#0A1512;
+      --accent-soft:#1C3A31;
+      --warn:#E1A45B;
+      --warn-soft:#3B2C17;
+      --bad:#E17E6E;
+      --bad-soft:#3B211A;
+      --good:#4FCB8C;
+      --good-soft:#1A3A28;
+      --shadow: 0 1px 2px rgba(0,0,0,.45), 0 10px 26px rgba(0,0,0,.4);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0F1613;
+    --surface:#182620;
+    --surface-2:#1E2E27;
+    --ink:#E8F0EA;
+    --muted:#94AB9E;
+    --line:#293A31;
+    --accent:#41BF9C;
+    --accent-ink:#0A1512;
+    --accent-soft:#1C3A31;
+    --warn:#E1A45B;
+    --warn-soft:#3B2C17;
+    --bad:#E17E6E;
+    --bad-soft:#3B211A;
+    --good:#4FCB8C;
+    --good-soft:#1A3A28;
+    --shadow: 0 1px 2px rgba(0,0,0,.45), 0 10px 26px rgba(0,0,0,.4);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--font-body);
+    min-height:100vh;
+    -webkit-tap-highlight-color: transparent;
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:.001ms !important; transition-duration:.001ms !important;}
+  }
+  h1,h2,h3{font-family:var(--font-display); text-wrap:balance; margin:0; letter-spacing:.2px;}
+  .num{font-family:var(--font-mono); font-variant-numeric:tabular-nums;}
+  button{font-family:var(--font-body); cursor:pointer;}
+  input, select{font-family:var(--font-body);}
+  a{color:var(--accent);}
+  :focus-visible{outline:3px solid var(--accent); outline-offset:2px;}
+
+  .shell{max-width:1100px;margin:0 auto;padding:18px 18px 48px;}
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    padding:10px 4px 18px;
+    flex-wrap:wrap;
+  }
+  .brand{display:flex; align-items:center; gap:10px;}
+  .brand-mark{
+    width:34px;height:34px;border-radius:9px;background:var(--accent);color:var(--accent-ink);
+    display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-weight:700;font-size:18px;
+  }
+  .brand-logo{height:34px;width:auto;display:block;}
+  .brand-name{font-family:var(--font-display); font-weight:700; font-size:20px; letter-spacing:.3px;}
+  .status-pill{
+    font-size:12px; padding:4px 10px; border-radius:999px; background:var(--surface-2); color:var(--muted);
+    display:inline-flex; align-items:center; gap:6px; font-weight:600;
+  }
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--good);}
+  .status-dot.warn{background:var(--warn);}
+  .status-dot.bad{background:var(--bad);}
+
+  .card{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow);
+  }
+
+  /* ---- Kiosk / worker flow ---- */
+  .kiosk{
+    min-height:calc(100vh - 90px);
+    display:flex; align-items:center; justify-content:center;
+    padding:20px;
+  }
+  .kiosk-card{
+    width:100%; max-width:460px;
+    padding:36px 32px 32px;
+    text-align:center;
+  }
+  .kiosk-eyebrow{
+    font-size:13px; font-weight:600; color:var(--accent); text-transform:uppercase; letter-spacing:1.2px; margin-bottom:10px;
+  }
+  .kiosk-title{font-size:26px; line-height:1.2; margin-bottom:8px;}
+  .kiosk-sub{color:var(--muted); font-size:15px; margin-bottom:24px; line-height:1.45;}
+  .kiosk-body{display:flex; flex-direction:column; gap:14px;}
+  select.big, input.big{
+    width:100%; font-size:19px; padding:16px 14px; border-radius:12px; border:1.5px solid var(--line);
+    background:var(--surface); color:var(--ink);
+  }
+  input.big{text-align:center; font-family:var(--font-mono); font-weight:600;}
+  input.big[type="text"]{font-family:var(--font-body); font-weight:400; text-align:left;}
+  .btn{
+    border:none; border-radius:12px; padding:16px 20px; font-size:17px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; gap:8px; width:100%;
+  }
+  .btn-primary{background:var(--accent); color:var(--accent-ink);}
+  .btn-primary:disabled{opacity:.45; cursor:not-allowed;}
+  .btn-ghost{background:var(--surface-2); color:var(--ink);}
+  .btn-danger{background:var(--bad-soft); color:var(--bad);}
+  .btn-row{display:flex; gap:10px;}
+  .btn-row .btn{flex:1;}
+  .link-btn{
+    background:none;border:none;color:var(--muted);font-size:13px;text-decoration:underline;
+    padding:8px; margin-top:6px;
+  }
+  .task-name-tag{
+    display:inline-block; background:var(--accent-soft); color:var(--accent); font-weight:700;
+    padding:4px 12px; border-radius:999px; font-size:14px; margin-bottom:2px;
+  }
+  .confirm-summary{
+    text-align:left; background:var(--surface-2); border-radius:12px; padding:14px 16px; font-size:15px;
+    display:flex; flex-direction:column; gap:6px; margin-bottom:6px;
+  }
+  .confirm-summary div{display:flex; justify-content:space-between; gap:10px;}
+  .confirm-summary b{font-family:var(--font-mono);}
+
+  /* ---- Notices / messages ---- */
+  .banner{
+    display:flex; align-items:center; justify-content:space-between; gap:14px;
+    padding:14px 18px; margin-bottom:12px; background:var(--accent-soft); border:1px solid var(--line);
+  }
+  .banner span{line-height:1.4;}
+  .banner button{flex-shrink:0;}
+
+  /* ---- Manager dashboard ---- */
+  .week-banner{
+    display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px;
+    padding:16px 20px; margin-bottom:18px;
+  }
+  .week-banner h2{font-size:22px;}
+  .week-banner .sub{color:var(--muted); font-size:14px; margin-top:2px;}
+  .toolbar{display:flex; gap:10px; flex-wrap:wrap;}
+  .toolbar button{
+    border:1px solid var(--line); background:var(--surface); color:var(--ink);
+    padding:10px 16px; border-radius:10px; font-weight:600; font-size:14px;
+  }
+  .toolbar button.primary{background:var(--accent); color:var(--accent-ink); border-color:transparent;}
+
+  .overall-row{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:20px;
+  }
+  .stat-tile{padding:16px 18px;}
+  .stat-tile .label{font-size:12px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted); font-weight:700;}
+  .stat-tile .value{font-family:var(--font-mono); font-size:28px; font-weight:600; margin-top:4px;}
+  .stat-tile .value.good{color:var(--good);}
+  .stat-tile .value.warn{color:var(--warn);}
+  .stat-tile .value.bad{color:var(--bad);}
+
+  .section-title{
+    font-size:13px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); font-weight:700;
+    margin:26px 4px 12px;
+  }
+  .task-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:14px;}
+  .task-card{padding:18px 20px;}
+  .task-card[draggable="true"]{cursor:grab;}
+  .task-card-head{display:flex; align-items:baseline; justify-content:space-between; gap:10px;}
+  .task-card-head h3{font-size:19px;}
+  .badge{
+    font-size:11px; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap;
+  }
+  .badge.good{background:var(--good-soft); color:var(--good);}
+  .badge.warn{background:var(--warn-soft); color:var(--warn);}
+  .badge.bad{background:var(--bad-soft); color:var(--bad);}
+  .badge.idle{background:var(--surface-2); color:var(--muted);}
+  .task-metrics{display:flex; gap:18px; margin:14px 0 10px;}
+  .task-metric .n{font-family:var(--font-mono); font-size:22px; font-weight:600;}
+  .task-metric .l{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
+  .task-recent{
+    font-size:13px; color:var(--muted); border-top:1px dashed var(--line); padding-top:10px; margin-top:4px;
+  }
+  .task-recent b{color:var(--ink); font-family:var(--font-mono);}
+
+  .slot-empty{
+    border:2px dashed var(--line); border-radius:var(--radius); padding:24px 16px; text-align:center; color:var(--muted); font-size:14px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:150px;
+  }
+
+  table.data-table{width:100%; border-collapse:collapse; font-size:14px;}
+  table.data-table th{
+    text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted);
+    padding:8px 10px; border-bottom:1px solid var(--line);
+  }
+  table.data-table td{padding:10px; border-bottom:1px solid var(--line);}
+  table.data-table td.num, table.data-table th.num{text-align:right; font-family:var(--font-mono);}
+  .table-wrap{overflow-x:auto;}
+
+  .panel{padding:22px 24px; margin-top:18px;}
+  .panel-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; gap:10px; flex-wrap:wrap;}
+  .row-form{display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px;}
+  .row-form input, .row-form select{
+    padding:10px 12px; border-radius:9px; border:1.5px solid var(--line); background:var(--surface); color:var(--ink); font-size:15px;
+  }
+  .list-row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:10px 4px; border-bottom:1px solid var(--line);
+  }
+  .list-row:last-child{border-bottom:none;}
+  .list-row .name{font-weight:600;}
+  .list-row .actions{display:flex; gap:8px; flex-wrap:wrap;}
+  .chip-btn{
+    border:1px solid var(--line); background:var(--surface-2); border-radius:8px; padding:6px 11px; font-size:12.5px; font-weight:600; color:var(--ink);
+  }
+  .chip-btn.danger{color:var(--bad); border-color:var(--bad-soft);}
+  .chip-btn.chip-active{background:var(--accent); color:var(--accent-ink); border-color:transparent;}
+  .inactive-tag{color:var(--muted); font-size:12px; font-style:italic;}
+
+  .modal-backdrop{
+    position:fixed; inset:0; background:rgba(10,15,12,.45); display:flex; align-items:center; justify-content:center;
+    padding:20px; z-index:20;
+  }
+  .modal{width:100%; max-width:440px; padding:26px 26px 22px; max-height:88vh; overflow-y:auto;}
+  .field{display:flex; flex-direction:column; gap:6px; margin-bottom:14px;}
+  .field label{font-size:13px; font-weight:600; color:var(--muted);}
+
+  .footer-note{
+    text-align:center; color:var(--muted); font-size:12.5px; margin-top:30px; display:flex; flex-direction:column; gap:6px; align-items:center;
+  }
+  .toast{
+    position:fixed; bottom:22px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--bg);
+    padding:12px 20px; border-radius:10px; font-size:14px; font-weight:600; box-shadow:var(--shadow); z-index:40;
+    max-width:90vw; text-align:center;
+  }
+  .input-error{ border-color:var(--bad) !important; background:var(--bad-soft) !important; }
+  .list-row[draggable="true"]{ cursor:grab; }
+  @media (max-width:640px){
+    .task-grid{grid-template-columns:1fr;}
+    .overall-row{grid-template-columns:repeat(2,1fr);}
+  }
+
+  /* ---- Stand-up meeting overlay ---- */
+  .standup-overlay{
+    position:fixed; inset:0; z-index:9999; background:#4FC3F7; color:#08222c;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px;
+    text-align:center; padding:24px; overflow:hidden;
+  }
+  .standup-overlay h2{color:#08222c; font-size:clamp(26px,6vw,50px);}
+  .standup-timer{
+    font-size:clamp(64px,20vw,170px); font-weight:700; color:#08222c; line-height:1;
+    font-variant-numeric:tabular-nums;
+  }
+  .standup-svg{position:absolute; opacity:.4; pointer-events:none;}
+  @keyframes standupBlink{ 0%,49%{ background:#4FC3F7; } 50%,100%{ background:#FFFFFF; } }
+  .standup-overlay.blinking{ animation: standupBlink 1s steps(1,end) 5; }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<script src="firebase-config.js"></script>
+<script type="module">
+  // ---- Firebase bridge: exposes window.ShiftFloorDB {subscribe(cb), save(stateObj)} ----
+  // and window.ShiftFloorDBReady (a Promise) which the main app script awaits before init().
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import { getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  window.ShiftFloorDBReady = new Promise(function(resolve){
+    try {
+      const cfg = window.FIREBASE_CONFIG;
+      if (!cfg || !cfg.apiKey || cfg.apiKey === "YOUR_API_KEY") {
+        console.warn("Shift Floor: firebase-config.js is not filled in yet — running offline (no shared sync).");
+        window.ShiftFloorDB = null;
+        resolve(null);
+        return;
+      }
+      const app = initializeApp(cfg);
+      const db = getFirestore(app);
+      const stateRef = doc(db, "shiftfloor", "state");
+
+      window.ShiftFloorDB = {
+        // cb(stateObjOrNull) — called once with current data (or null if no doc yet exists),
+        // then again on every remote change.
+        subscribe: function(cb){
+          return onSnapshot(stateRef, function(snap){
+            if (!snap.exists()) { cb(null); return; }
+            const data = snap.data();
+            try {
+              cb(data && data.state ? JSON.parse(data.state) : data);
+            } catch(e){
+              console.error("Shift Floor: failed to parse remote state", e);
+              cb(null);
+            }
+          }, function(err){
+            console.error("Shift Floor: onSnapshot error", err);
+          });
+        },
+        // save(stateObj) -> Promise
+        save: function(stateObj){
+          return setDoc(stateRef, { state: JSON.stringify(stateObj), updatedAt: Date.now() });
+        }
+      };
+      resolve(window.ShiftFloorDB);
+    } catch(e){
+      console.error("Shift Floor: Firebase init failed", e);
+      window.ShiftFloorDB = null;
+      resolve(null);
+    }
+  });
+</script>
+<script>
+(function(){
+  "use strict";
+
+  const MTDATA_LOGO_DATAURI = "data:image/png;base64,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";
+
+  /* ---------------- utilities ---------------- */
+  function uid(prefix){
+    return (prefix||"id") + Date.now().toString(36) + Math.random().toString(36).slice(2,8);
+  }
+  function slugify(name){
+    return "t-" + name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"");
+  }
+  function escapeHtml(s){
+    return String(s==null?"":s).replace(/[&<>"']/g, function(c){
+      return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];
+    });
+  }
+  function clamp0(n){ n = Math.floor(Number(n)); return isNaN(n) || n < 0 ? 0 : n; }
+  function pad2(n){ return n < 10 ? "0"+n : ""+n; }
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const DOWS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+  function weekStartFor(d){
+    const x = new Date(d);
+    x.setHours(0,0,0,0);
+    const day = x.getDay();
+    const diff = (day - 6 + 7) % 7;
+    x.setDate(x.getDate() - diff);
+    return x;
+  }
+  function weekKeyOf(d){
+    const s = weekStartFor(d);
+    return s.getFullYear()+"-"+pad2(s.getMonth()+1)+"-"+pad2(s.getDate());
+  }
+  function weekEndFor(startDate){
+    const e = new Date(startDate);
+    e.setDate(e.getDate()+6);
+    e.setHours(23,59,59,999);
+    return e;
+  }
+  function fmtDateShort(d){
+    return DOWS[d.getDay()]+" "+d.getDate()+" "+MONTHS[d.getMonth()];
+  }
+  function fmtRange(start){
+    const end = weekEndFor(start);
+    const year = end.getFullYear();
+    return fmtDateShort(start)+" – "+fmtDateShort(end)+" "+year;
+  }
+  function fmtRelTime(ts){
+    const diffMs = Date.now() - new Date(ts).getTime();
+    const m = Math.round(diffMs/60000);
+    if (m < 1) return "just now";
+    if (m < 60) return m + (m===1?" min ago":" mins ago");
+    const h = Math.round(m/60);
+    if (h < 24) return h + (h===1?" hour ago":" hours ago");
+    const d = Math.round(h/24);
+    return d + (d===1?" day ago":" days ago");
+  }
+  function fmtPct(n){ return n==null ? "—" : n.toFixed(1)+"%"; }
+  function monthKeyOf(d){ const x = new Date(d); return x.getFullYear()+"-"+pad2(x.getMonth()+1); }
+  function monthStartFor(d){ const x = new Date(d); return new Date(x.getFullYear(), x.getMonth(), 1); }
+  function monthEndFor(d){ const x = new Date(d); return new Date(x.getFullYear(), x.getMonth()+1, 0, 23,59,59,999); }
+  function fmtMonthLabel(d){ return MONTHS[d.getMonth()]+" "+d.getFullYear(); }
+
+  /* ---------------- default seed data ---------------- */
+  const DEFAULT_TASK_NAMES = [
+    "4625 Modem Board BOT","4625 Modem Board TOP","4000-12 CPU BOT","4000-12 CPU TOP",
+    "7000-03+01 BOTTOM INSP/REWORK","7000-03+01 TOP INSP/REWORK","7010-03+01 Power board TOP INSP/REWORK",
+    "7020-03+01 Camera board BOT INSP/REWORK","7020-03+01 Camera board TOP INSP/REWORK",
+    "4625 Modem Board BOT INSP/REWORK","4625 Modem Board TOP INSP/REWORK","4000-12 CPU BOT INSP/REWORK",
+    "4000-12 CPU TOP INSP/REWORK","7000-03+01 Mainboard BOT SELECTIVE","7000-03+01 Mainboard TOP SELECTIVE",
+    "7010-03+01 Power board SELECTIVE","7020 Camera board SELECTIVE","4625 Modem board SELECTIVE",
+    "4000-12 CPU board SELECTIVE","7000-03+01 Main board TOUCH-UP","7010-03+01 Power board TOUCH-UP",
+    "7020-03+01 Camera board TOUCH-UP","Heat D","SD card(5000) replace","Duress Kit",
+    "4625 Modem board TOUCH-UP","4000-12 CPU board TOUCH-UP","7000-03+01 Main board TEST",
+    "7010-03+01 Power board TEST","7020-03+01 Camera board TEST","7000 sub assembly",
+    "7000 Main board Preparation","4000-12 CPU Board Test","4625 SAT Modem Board Test",
+    "7000-03+01 Main board RE-TEST (repair)","7010-03+01 Power board RE-TEST (repair)",
+    "7020-03+01 Camera board RE-TEST (repair)","4000-12 CPU Board RE-TEST (repair)",
+    "4625 SAT Modem Board RE-TEST (repair)","7000AI Sub-assembly (sub top)","7000AI Main Assembly",
+    "7000AI Sub-assembly (full top)","Orica Box (building)","7000AI PROVISIONING",
+    "7000 Battery preparation","SOM","Tablet","7000AI Access plate and side bracket install",
+    "Camera (bracket)","4705 SAT Modem case","CanBUS to truck kit","4705 assembly"
+  ];
+  const SEED_TAG = "v2-tasklist-1";
+  const DEFAULT_WORKER_NAMES = ["Mark(test)","Rocky","Hen","Phung","Bao","Dennis","Geraldine","Kim"];
+  const WORKER_SEED_TAG = "v1-workerlist-1";
+  const SMT_TOP_TASK_NAMES = [
+    "7000-03+01 BOT (SMT)","7000-03+01 CPU TOP (SMT)","7000-03+01 CPU BOT (SMT)",
+    "7010-03+01 PSU TOP (SMT)","7020-03+01 CAM BOT (SMT)","7020-03+01 CAM TOP (SMT)"
+  ];
+  const SMT_SEED_TAG = "v3-smt-top-1";
+  const DEFAULT_SERIAL_FORMAT = { totalLength:9, prefixes:["7010","701"] };
+  const TOUCHUP_PARTS = {
+    "7000-03+01 main board touch-up": 20,
+    "7010-03+01 power board touch-up": 13,
+    "7020-03+01 camera board touch-up": 2,
+    "4625 modem board touch-up": null,
+    "4000-12 cpu board touch-up": null
+  };
+  const PPU_SEED_TAG = "v1-ppu-1";
+  const SMT_YIELD_NAMES = ["7000-03+01 BOTTOM INSP/REWORK","7000-03+01 TOP INSP/REWORK","7010-03+01 Power board TOP INSP/REWORK","7020-03+01 Camera board BOT INSP/REWORK","7020-03+01 Camera board TOP INSP/REWORK","4625 Modem Board BOT INSP/REWORK","4625 Modem Board TOP INSP/REWORK","4000-12 CPU BOT INSP/REWORK","4000-12 CPU TOP INSP/REWORK"];
+  const THROUGHHOLE_YIELD_NAMES = ["7000-03+01 Main board TOUCH-UP","7010-03+01 Power board TOUCH-UP","7020-03+01 Camera board TOUCH-UP","4625 Modem board TOUCH-UP","4000-12 CPU board TOUCH-UP"];
+  const TEST_YIELD_NAMES = ["7000-03+01 Main board TEST","7010-03+01 Power board TEST","7020-03+01 Camera board TEST","4625 SAT Modem Board Test","4000-12 CPU Board Test"];
+  const COMBO_SEED_TAG = "v1-combos-1";
+  const STANDUP_SEED_TAG = "v1-standup-1";
+  const DEFAULT_STANDUP = { enabled:true, days:[1,2,3,4,5], hour:11, minute:0 };
+
+  function buildDefaultState(){
+    function mkTask(name, id){
+      return { id:id, name:name, active:true, aliases:[], partsPerUnit: TOUCHUP_PARTS[name.trim().toLowerCase()]||null };
+    }
+    return {
+      managers: [
+        { id:"mark", name:"Mark", pin:"1234" },
+        { id:"daniel", name:"Daniel Tucker", pin:"1234" }
+      ],
+      tasks: SMT_TOP_TASK_NAMES.map(function(name,i){ return mkTask(name, slugify(name)+"-smt"+i); })
+        .concat(DEFAULT_TASK_NAMES.map(function(name,i){ return mkTask(name, slugify(name)+"-"+i); })),
+      workers: DEFAULT_WORKER_NAMES.map(function(name,i){ return { id: "w-"+slugify(name).slice(2)+"-"+i, name:name, active:true }; }),
+      entries: [],
+      pendingRequests: [],
+      workerMessages: [],
+      managerNotices: [],
+      notices: [],
+      assignments: [],
+      combos: [],
+      headlineTaskId: null,
+      serialTaskId: null,
+      serials: [],
+      serialFormat: Object.assign({}, DEFAULT_SERIAL_FORMAT),
+      reassignUntil: null,
+      seedTag: null,
+      workerSeedTag: null,
+      smtSeedTag: SMT_SEED_TAG,
+      comboSeedTag: null,
+      ppuSeedTag: null,
+      standup: Object.assign({}, DEFAULT_STANDUP),
+      standupSeedTag: STANDUP_SEED_TAG
+    };
+  }
+
+  /* ---------------- state ---------------- */
+  let STATE = null;
+  let dbApi = null;
+  let saveStatus = "idle";
+  let ui = { screen: null };
+  let toastMsg = null, toastTimer = null;
+  let standupOverlayState = null; // { phase:'countdown'|'blinking'|'holding', occTs:Number, secondsLeft:Number }
+  let standupClockTimer = null;
+
+  function loadUi(){
+    try {
+      const raw = sessionStorage.getItem("td_ui");
+      if (raw) ui = JSON.parse(raw);
+    } catch(e){}
+    if (!ui || !ui.screen) ui = ui || {};
+  }
+  function saveUi(){
+    try { sessionStorage.setItem("td_ui", JSON.stringify(ui)); } catch(e){}
+  }
+  function setUi(patch){
+    ui = Object.assign({}, ui, patch);
+    saveUi();
+    render();
+  }
+  function getDeviceMode(){ try { return localStorage.getItem("td_deviceMode"); } catch(e){ return null; } }
+  function setDeviceMode(m){ try { localStorage.setItem("td_deviceMode", m); } catch(e){} }
+  function getAssignedWorkerId(){ try { return localStorage.getItem("td_assignedWorkerId"); } catch(e){ return null; } }
+  function setAssignedWorkerId(id){
+    try { if (id) localStorage.setItem("td_assignedWorkerId", id); else localStorage.removeItem("td_assignedWorkerId"); } catch(e){}
+  }
+  function getMgrIdentity(){ try { return sessionStorage.getItem("td_mgrIdentity"); } catch(e){ return null; } }
+  function setMgrIdentity(id){
+    try { if (id) sessionStorage.setItem("td_mgrIdentity", id); else sessionStorage.removeItem("td_mgrIdentity"); } catch(e){}
+  }
+  function mgrKey(base){ return base + "_" + (getMgrIdentity() || "guest"); }
+  function getPriorityPins(){
+    try { const raw = localStorage.getItem(mgrKey("td_priorityPins")); return raw ? JSON.parse(raw) : [null,null,null,null]; } catch(e){ return [null,null,null,null]; }
+  }
+  function setPriorityPins(arr){ try { localStorage.setItem(mgrKey("td_priorityPins"), JSON.stringify(arr)); } catch(e){} }
+  function isPriorityCollapsed(){ try { return localStorage.getItem(mgrKey("td_priorityCollapsed"))==="1"; } catch(e){ return false; } }
+  function setPriorityCollapsed(v){ try { localStorage.setItem(mgrKey("td_priorityCollapsed"), v?"1":"0"); } catch(e){} }
+  function isSerialsCollapsed(){ try { return localStorage.getItem(mgrKey("td_serialsCollapsed"))==="1"; } catch(e){ return false; } }
+  function setSerialsCollapsed(v){ try { localStorage.setItem(mgrKey("td_serialsCollapsed"), v?"1":"0"); } catch(e){} }
+  function isYieldCollapsed(){ try { return localStorage.getItem(mgrKey("td_yieldCollapsed"))==="1"; } catch(e){ return false; } }
+  function setYieldCollapsed(v){ try { localStorage.setItem(mgrKey("td_yieldCollapsed"), v?"1":"0"); } catch(e){} }
+  function isReassignOpen(){ return !!(STATE && STATE.reassignUntil && new Date(STATE.reassignUntil).getTime() > Date.now()); }
+  function ackGet(key){ try { return JSON.parse(localStorage.getItem(key)||"[]"); } catch(e){ return []; } }
+  function ackAdd(key,id){
+    const arr = ackGet(key);
+    if (arr.indexOf(id)===-1){ arr.push(id); try{ localStorage.setItem(key, JSON.stringify(arr)); }catch(e){} }
+  }
+  function getStandupAckedAt(){
+    try { const v = localStorage.getItem("td_standupAckedAt"); return v ? Number(v) : 0; } catch(e){ return 0; }
+  }
+  function setStandupAckedAt(ts){
+    try { localStorage.setItem("td_standupAckedAt", String(ts)); } catch(e){}
+  }
+
+  function showToast(msg){
+    if (!msg) return;
+    toastMsg = msg;
+    render();
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ toastMsg = null; render(); }, 3200);
+  }
+
+  /* ---------------- migration ---------------- */
+  function migrateState(){
+    let changed = false;
+    if (!STATE.tasks) { STATE.tasks = []; changed = true; }
+    STATE.tasks.forEach(function(t){
+      if (!t.aliases) { t.aliases = []; changed = true; }
+      if (typeof t.active !== "boolean") { t.active = true; changed = true; }
+    });
+    if (!STATE.workers) { STATE.workers = []; changed = true; }
+    if (!STATE.entries) { STATE.entries = []; changed = true; }
+    if (!STATE.pendingRequests) { STATE.pendingRequests = []; changed = true; }
+    if (!STATE.workerMessages) { STATE.workerMessages = []; changed = true; }
+    if (!STATE.notices) { STATE.notices = []; changed = true; }
+    if (!STATE.assignments) { STATE.assignments = []; changed = true; }
+    if (!STATE.managers || !STATE.managers.length) {
+      const legacyPin = STATE.pin || "1234";
+      STATE.managers = [
+        { id:"mark", name:"Mark", pin: legacyPin },
+        { id:"daniel", name:"Daniel Tucker", pin:"1234" }
+      ];
+      changed = true;
+    }
+    if (STATE.pin !== undefined) { delete STATE.pin; changed = true; }
+    if (STATE.priorityTaskIds !== undefined) { delete STATE.priorityTaskIds; changed = true; }
+    if (!STATE.managerNotices) { STATE.managerNotices = []; changed = true; }
+    if (STATE.reassignUntil === undefined) { STATE.reassignUntil = null; changed = true; }
+    if (!STATE.combos) { STATE.combos = []; changed = true; }
+
+    if (STATE.comboSeedTag !== COMBO_SEED_TAG) {
+      // The 3 built-in yield groups (SMT/Through-hole/Test) are always-on and computed
+      // directly from SMT_YIELD_NAMES/THROUGHHOLE_YIELD_NAMES/TEST_YIELD_NAMES — they are
+      // NOT stored as user combos. STATE.combos only holds manager-created custom groups.
+      if (!STATE.combos) STATE.combos = [];
+      STATE.comboSeedTag = COMBO_SEED_TAG;
+      changed = true;
+    }
+    [SMT_YIELD_NAMES, THROUGHHOLE_YIELD_NAMES, TEST_YIELD_NAMES].forEach(function(list){
+      list.forEach(function(name){
+        const key = name.trim().toLowerCase();
+        const found = STATE.tasks.some(function(t){ return t.name.trim().toLowerCase() === key; });
+        if (!found) console.warn('Yield group task name did not resolve to any task: "'+name+'"');
+      });
+    });
+
+    if (STATE.ppuSeedTag !== PPU_SEED_TAG) {
+      STATE.tasks.forEach(function(t){
+        if (t.partsPerUnit === undefined) {
+          const key = t.name.trim().toLowerCase();
+          if (Object.prototype.hasOwnProperty.call(TOUCHUP_PARTS, key)) t.partsPerUnit = TOUCHUP_PARTS[key];
+        }
+      });
+      STATE.ppuSeedTag = PPU_SEED_TAG;
+      changed = true;
+    }
+
+    if (STATE.seedTag !== SEED_TAG) {
+      const existing = {};
+      STATE.tasks.forEach(function(t){ existing[t.name.trim().toLowerCase()] = true; });
+      DEFAULT_TASK_NAMES.forEach(function(name,i){
+        const key = name.trim().toLowerCase();
+        if (!existing[key]) {
+          STATE.tasks.push({ id: slugify(name)+"-new"+i, name:name, active:true, aliases:[] });
+          existing[key] = true;
+        }
+      });
+      STATE.seedTag = SEED_TAG;
+      changed = true;
+    }
+    if (!STATE.headlineTaskId || !findTask(STATE.headlineTaskId)) {
+      const headline = STATE.tasks.find(function(t){ return t.name.trim().toLowerCase() === "7000ai provisioning"; });
+      if (headline) { STATE.headlineTaskId = headline.id; changed = true; }
+    }
+    if (!STATE.serials) { STATE.serials = []; changed = true; }
+    if (!STATE.serialTaskId || !findTask(STATE.serialTaskId)) {
+      const serialTask = STATE.tasks.find(function(t){ return t.name.trim().toLowerCase() === "7000ai provisioning"; });
+      if (serialTask) { STATE.serialTaskId = serialTask.id; changed = true; }
+    }
+    if (!STATE.serialFormat || !STATE.serialFormat.totalLength || !STATE.serialFormat.prefixes) {
+      STATE.serialFormat = Object.assign({}, DEFAULT_SERIAL_FORMAT);
+      changed = true;
+    }
+
+    if (STATE.smtSeedTag !== SMT_SEED_TAG) {
+      const existingSmt = {};
+      STATE.tasks.forEach(function(t){ existingSmt[t.name.trim().toLowerCase()] = true; });
+      const toPrepend = [];
+      SMT_TOP_TASK_NAMES.forEach(function(name,i){
+        const key = name.trim().toLowerCase();
+        if (!existingSmt[key]) {
+          toPrepend.push({ id: slugify(name)+"-smtnew"+i, name:name, active:true, aliases:[] });
+          existingSmt[key] = true;
+        }
+      });
+      if (toPrepend.length) STATE.tasks = toPrepend.concat(STATE.tasks);
+      STATE.smtSeedTag = SMT_SEED_TAG;
+      changed = true;
+    }
+
+    if (STATE.workerSeedTag !== WORKER_SEED_TAG) {
+      const existingW = {};
+      STATE.workers.forEach(function(w){ existingW[w.name.trim().toLowerCase()] = true; });
+      DEFAULT_WORKER_NAMES.forEach(function(name,i){
+        const key = name.trim().toLowerCase();
+        if (!existingW[key]) {
+          STATE.workers.push({ id:"w-"+slugify(name).slice(2)+"-new"+i, name:name, active:true });
+          existingW[key] = true;
+        }
+      });
+      const sample = STATE.workers.find(function(w){ return w.name.trim().toLowerCase() === "sample worker"; });
+      if (sample && sample.active) sample.active = false;
+      STATE.workerSeedTag = WORKER_SEED_TAG;
+      changed = true;
+    }
+
+    if (STATE.standupSeedTag !== STANDUP_SEED_TAG) {
+      if (!STATE.standup) STATE.standup = Object.assign({}, DEFAULT_STANDUP);
+      STATE.standupSeedTag = STANDUP_SEED_TAG;
+      changed = true;
+    }
+    if (!STATE.standup) { STATE.standup = Object.assign({}, DEFAULT_STANDUP); changed = true; }
+    if (!Array.isArray(STATE.standup.days)) { STATE.standup.days = DEFAULT_STANDUP.days.slice(); changed = true; }
+    if (typeof STATE.standup.hour !== "number") { STATE.standup.hour = DEFAULT_STANDUP.hour; changed = true; }
+    if (typeof STATE.standup.minute !== "number") { STATE.standup.minute = DEFAULT_STANDUP.minute; changed = true; }
+    if (typeof STATE.standup.enabled !== "boolean") { STATE.standup.enabled = DEFAULT_STANDUP.enabled; changed = true; }
+    return changed;
+  }
+
+  /* ---------------- standup meeting reminder ---------------- */
+  function computeStandupOverlay(){
+    if (!STATE || !STATE.standup || !STATE.standup.enabled) return null;
+    const cfg = STATE.standup;
+    const now = new Date();
+    const dow = now.getDay();
+    if ((cfg.days||[]).indexOf(dow) === -1) return null;
+    const occ = new Date(now.getFullYear(), now.getMonth(), now.getDate(), cfg.hour||0, cfg.minute||0, 0, 0);
+    const occTs = occ.getTime();
+    const nowTs = now.getTime();
+    const dayEndTs = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+    const ackedAt = getStandupAckedAt();
+    if (ackedAt && ackedAt >= occTs) return null; // this occurrence already acknowledged on this device
+    if (nowTs < occTs - 60000) return null; // more than 1 minute before — nothing to show yet
+    if (nowTs > dayEndTs) return null; // stale — day has ended, wait for the next scheduled occurrence
+    if (nowTs < occTs) {
+      return { phase:"countdown", occTs:occTs, secondsLeft: Math.max(1, Math.ceil((occTs - nowTs)/1000)) };
+    }
+    const elapsed = nowTs - occTs;
+    if (elapsed < 5000) return { phase:"blinking", occTs:occTs };
+    return { phase:"holding", occTs:occTs };
+  }
+  function standupStateKey(s){
+    return s ? (s.phase+":"+s.occTs+":"+(s.secondsLeft||0)) : "none";
+  }
+  function startStandupClock(){
+    if (standupClockTimer) return;
+    standupClockTimer = setInterval(function(){
+      const next = computeStandupOverlay();
+      if (standupStateKey(next) !== standupStateKey(standupOverlayState)) {
+        standupOverlayState = next;
+        render();
+      }
+    }, 1000);
+  }
+  function standupOverlayHtml(){
+    const s = standupOverlayState;
+    if (!s) return "";
+    const decor =
+      '<svg class="standup-svg" style="top:18px;left:18px;width:70px;height:70px;" viewBox="0 0 100 100" aria-hidden="true">'+
+        '<g fill="none" stroke="#08222c" stroke-width="4">'+
+          '<circle cx="50" cy="50" r="22"/>'+
+          '<circle cx="50" cy="50" r="8" fill="#08222c"/>'+
+          '<g>'+[0,45,90,135,180,225,270,315].map(function(a){
+            return '<rect x="47" y="6" width="6" height="16" rx="2" transform="rotate('+a+' 50 50)"/>';
+          }).join("")+'</g>'+
+        '</g>'+
+      '</svg>'+
+      '<svg class="standup-svg" style="bottom:18px;right:18px;width:80px;height:80px;" viewBox="0 0 100 100" aria-hidden="true">'+
+        '<g fill="none" stroke="#08222c" stroke-width="4">'+
+          '<circle cx="50" cy="50" r="16"/>'+
+          '<circle cx="50" cy="50" r="6" fill="#08222c"/>'+
+          '<g>'+[0,60,120,180,240,300].map(function(a){
+            return '<rect x="47" y="4" width="6" height="14" rx="2" transform="rotate('+a+' 50 50)"/>';
+          }).join("")+'</g>'+
+        '</g>'+
+      '</svg>'+
+      '<svg class="standup-svg" style="bottom:24px;left:6%;width:34%;height:36px;" viewBox="0 0 300 40" preserveAspectRatio="none" aria-hidden="true">'+
+        '<g fill="none" stroke="#08222c" stroke-width="4">'+
+          '<line x1="0" y1="20" x2="300" y2="20"/>'+
+          '<line x1="0" y1="30" x2="300" y2="30"/>'+
+          [0,30,60,90,120,150,180,210,240,270,300].map(function(x){
+            return '<line x1="'+x+'" y1="20" x2="'+x+'" y2="30"/>';
+          }).join("")+
+        '</g>'+
+      '</svg>'+
+      '<svg class="standup-svg" style="top:8%;right:6%;width:30%;height:60px;" viewBox="0 0 220 60" preserveAspectRatio="none" aria-hidden="true">'+
+        '<g fill="none" stroke="#08222c" stroke-width="3">'+
+          '<path d="M0 30 H60 V10 H140 V50 H220"/>'+
+          '<circle cx="60" cy="30" r="4" fill="#08222c" stroke="none"/>'+
+          '<circle cx="140" cy="10" r="4" fill="#08222c" stroke="none"/>'+
+          '<circle cx="140" cy="50" r="4" fill="#08222c" stroke="none"/>'+
+        '</g>'+
+      '</svg>';
+
+    if (s.phase === "countdown") {
+      const m = Math.floor(s.secondsLeft/60), sec = s.secondsLeft%60;
+      const clock = (m>0 ? (m+":"+pad2(sec)) : String(sec));
+      return (
+        '<div class="standup-overlay">'+decor+
+          '<div class="kiosk-eyebrow" style="color:#08222c;">Coming up</div>'+
+          '<h2>Stand-up Meeting</h2>'+
+          '<div class="standup-timer num">'+clock+'</div>'+
+          '<div style="color:#08222c;font-size:16px;">starting in the workshop — head over now</div>'+
+        '</div>'
+      );
+    }
+    if (s.phase === "blinking") {
+      return (
+        '<div class="standup-overlay blinking">'+decor+
+          '<h2>Stand-up Meeting</h2>'+
+          '<div class="standup-timer num">NOW</div>'+
+        '</div>'
+      );
+    }
+    // holding
+    return (
+      '<div class="standup-overlay">'+decor+
+        '<h2 style="font-size:clamp(30px,7vw,58px);">Stand-up Meeting — Now</h2>'+
+        '<div style="color:#08222c;font-size:17px;max-width:420px;">Head to the meeting point. Tap below once you’ve seen this.</div>'+
+        '<button class="btn btn-primary" style="width:auto;padding:18px 34px;background:#08222c;color:#fff;" onclick="App.ackStandup()">Acknowledge</button>'+
+      '</div>'
+    );
+  }
+
+  let firstSnapshot = true;
+  let applyingRemote = false;
+
+  async function init(){
+    loadUi();
+    STATE = buildDefaultState();
+    migrateState();
+    standupOverlayState = computeStandupOverlay();
+    render();
+    startStandupClock();
+
+    try {
+      dbApi = await Promise.race([
+        window.ShiftFloorDBReady || Promise.resolve(null),
+        new Promise(function(resolve){ setTimeout(function(){ resolve(null); }, 10500); })
+      ]);
+    } catch(e){ dbApi = null; }
+
+    if (!dbApi) {
+      saveStatus = "offline";
+      render();
+      return;
+    }
+
+    dbApi.subscribe(function(remoteState){
+      if (firstSnapshot) {
+        firstSnapshot = false;
+        if (remoteState) {
+          STATE = remoteState;
+          const changed = migrateState();
+          saveStatus = "saved";
+          render();
+          if (changed) persist(true);
+        } else {
+          // First run: no document yet — seed it with our default state.
+          const changed = migrateState();
+          persist(true);
+        }
+        return;
+      }
+      // Live update from another tablet/dashboard.
+      applyingRemote = true;
+      STATE = remoteState || STATE;
+      migrateState();
+      saveStatus = "saved";
+      render();
+      applyingRemote = false;
+    });
+  }
+
+  let persistTimer = null, retryTimer = null, retryCount = 0;
+  function scheduleRetry(){
+    if (retryCount >= 3) return;
+    retryCount++;
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(function(){ persist(true); }, 6000*retryCount);
+  }
+  function persist(silent, successMsg, failMsg){
+    if (!dbApi) {
+      saveStatus = "offline";
+      if (failMsg) showToast(failMsg);
+      if (!silent) render();
+      return;
+    }
+    saveStatus = "saving";
+    if (!silent) render();
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(async function(){
+      try {
+        await dbApi.save(STATE);
+        saveStatus = "saved";
+        retryCount = 0;
+        if (successMsg) showToast(successMsg);
+        render();
+      } catch(err){
+        saveStatus = "offline";
+        if (failMsg) showToast(failMsg);
+        scheduleRetry();
+        render();
+      }
+    }, 150);
+  }
+
+  /* ---------------- data helpers ---------------- */
+  function activeTasks(){ return STATE.tasks.filter(function(t){ return t.active; }); }
+  function activeWorkers(){ return STATE.workers.filter(function(w){ return w.active; }); }
+  function findTask(id){ return STATE.tasks.find(function(t){ return t.id===id; }); }
+  function findWorker(id){ return STATE.workers.find(function(w){ return w.id===id; }); }
+  function validateSerialFormat(raw){
+    const fmt = STATE.serialFormat || DEFAULT_SERIAL_FORMAT;
+    if (!/^[0-9]+$/.test(raw)) return "Wrong format — digits only.";
+    if (raw.length !== fmt.totalLength) return "Wrong format — must be "+fmt.totalLength+" digits total.";
+    const okPrefix = (fmt.prefixes||[]).some(function(p){ return raw.indexOf(p)===0; });
+    if (!okPrefix) return "Wrong format — must start with "+(fmt.prefixes||[]).join(" or ")+".";
+    return null;
+  }
+  function focusSelectSerialInput(clearValue){
+    setTimeout(function(){
+      const el = document.getElementById("serialInput");
+      if (!el) return;
+      el.focus();
+      if (clearValue) el.value = "";
+      else el.select();
+    }, 0);
+  }
+  function findTaskByNameOrAlias(label){
+    const key = (label||"").trim().toLowerCase();
+    if (!key) return null;
+    return STATE.tasks.find(function(t){
+      if (t.name.trim().toLowerCase() === key) return true;
+      return (t.aliases||[]).some(function(a){ return a.trim().toLowerCase() === key; });
+    }) || null;
+  }
+
+  function aggregateWeek(weekKey){
+    const byTask = {};
+    STATE.entries.forEach(function(e){
+      if (weekKeyOf(e.ts) !== weekKey) return;
+      const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null });
+      agg.made += e.made;
+      agg.faults += e.faults;
+      agg.count += 1;
+      if (!agg.lastTs || new Date(e.ts) > new Date(agg.lastTs)) { agg.lastTs = e.ts; agg.lastEntry = e; }
+    });
+    return byTask;
+  }
+  function aggregateMonth(monthKey){
+    const byTask = {};
+    STATE.entries.forEach(function(e){
+      if (monthKeyOf(e.ts) !== monthKey) return;
+      const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null });
+      agg.made += e.made;
+      agg.faults += e.faults;
+      agg.count += 1;
+      if (!agg.lastTs || new Date(e.ts) > new Date(agg.lastTs)) { agg.lastTs = e.ts; agg.lastEntry = e; }
+    });
+    return byTask;
+  }
+  function yieldPct(made, faults, ppu){
+    ppu = ppu || 1;
+    const total = made*ppu;
+    return total > 0 ? ((total - faults)/total*100) : null;
+  }
+  function faultPct(made, faults, ppu){
+    ppu = ppu || 1;
+    const total = made*ppu;
+    return total > 0 ? (faults/total*100) : null;
+  }
+  function tierFor(kind, pct){
+    if (pct == null) return "idle";
+    if (kind === "yield") return pct >= 97 ? "good" : (pct >= 90 ? "warn" : "bad");
+    return pct <= 3 ? "good" : (pct <= 10 ? "warn" : "bad");
+  }
+  function comboTotals(taskIds, curAgg){
+    let made=0, faults=0, capacity=0;
+    (taskIds||[]).forEach(function(tid){
+      const a = curAgg[tid];
+      if (!a) return;
+      const t = findTask(tid);
+      const ppu = (t && t.partsPerUnit) || 1;
+      made += a.made; faults += a.faults; capacity += a.made*ppu;
+    });
+    return { made:made, faults:faults, capacity:capacity, yield:yieldPct(capacity,faults,1), faultRate:faultPct(capacity,faults,1) };
+  }
+  function buildWorkerTaskRows(filterFn){
+    const byWorker = {};
+    STATE.entries.filter(filterFn).forEach(function(e){
+      const task = findTask(e.taskId);
+      const ppu = (task && task.partsPerUnit) || 1;
+      const capacity = e.made*ppu;
+      const w = byWorker[e.workerId] || (byWorker[e.workerId] = { workerId:e.workerId, tasks:{}, made:0, faults:0, capacity:0 });
+      const tk = w.tasks[e.taskId] || (w.tasks[e.taskId] = { made:0, faults:0, capacity:0 });
+      tk.made += e.made; tk.faults += e.faults; tk.capacity += capacity;
+      w.made += e.made; w.faults += e.faults; w.capacity += capacity;
+    });
+    return byWorker;
+  }
+
+  function addEntry(workerId, taskId, made, faults, by, opts){
+    opts = opts || {};
+    const task = findTask(taskId);
+    const ppu = (task && task.partsPerUnit) || 1;
+    const madeClamped = clamp0(made);
+    const maxPossible = madeClamped*ppu;
+    const entry = {
+      id: uid("e"),
+      workerId: workerId,
+      taskId: taskId,
+      made: madeClamped,
+      faults: clamp0(Math.min(faults, maxPossible)),
+      ts: opts.ts || new Date().toISOString(),
+      by: by
+    };
+    STATE.entries.push(entry);
+    persist(false, opts.successMsg, opts.failMsg);
+    return entry;
+  }
+
+  /* ---------------- rendering: shell ---------------- */
+  function render(){
+    const app = document.getElementById("app");
+    const mode = getDeviceMode();
+    let html = "";
+    if (!mode) {
+      html = renderModeChooser();
+    } else if (mode === "manager") {
+      html = renderTopbar("manager") + renderMessageArea() + renderManager();
+    } else {
+      html = renderTopbar("worker") + renderMessageArea() + renderWorker();
+    }
+    if (toastMsg) html += '<div class="toast">'+escapeHtml(toastMsg)+'</div>';
+    html += standupOverlayHtml();
+    app.innerHTML = html;
+    focusPrimaryInput();
+  }
+  function focusPrimaryInput(){
+    requestAnimationFrame(function(){
+      const el = document.querySelector('[data-autofocus="1"]');
+      if (!el) return;
+      try {
+        el.focus();
+        if (el.value) el.select();
+      } catch(e){}
+    });
+  }
+
+  function statusPillHtml(){
+    let dot = "good", label = "Synced";
+    if (saveStatus === "saving") { dot="warn"; label="Saving…"; }
+    else if (saveStatus === "offline") { dot="bad"; label="Not synced — offline"; }
+    else if (saveStatus === "readonly") { dot="bad"; label="Read-only view"; }
+    else if (saveStatus === "idle") { dot="good"; label="Ready"; }
+    return '<span class="status-pill"><span class="status-dot '+dot+'"></span>'+label+'</span>';
+  }
+
+  function renderTopbar(mode){
+    const other = mode === "manager" ? "worker" : "manager";
+    const otherLabel = mode === "manager" ? "Switch to Worker view" : "Switch to Manager view";
+    const noticeCount = (STATE && STATE.notices) ? STATE.notices.length : 0;
+    const identity = mode === "manager" ? getMgrIdentity() : null;
+    const mgr = (identity && STATE) ? (STATE.managers||[]).find(function(m){ return m.id===identity; }) : null;
+    const identityLine = mgr ? (' · Logged in as '+escapeHtml(mgr.name)) : "";
+    return (
+      '<div class="shell" style="padding-bottom:0;">'+
+        '<div class="topbar">'+
+          '<div class="brand"><img src="'+MTDATA_LOGO_DATAURI+'" alt="MTData" class="brand-logo"><div><div class="brand-name">Shift Floor</div>'+
+          '<div style="font-size:12px;color:var(--muted);margin-top:-2px;">'+ (mode==="manager" ? "Manager Dashboard" : "Worker Update") + identityLine +'</div></div></div>'+
+          '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'+
+            statusPillHtml()+
+            '<button class="link-btn" style="margin:0;" onclick="App.toggleRecall()">🔔 Notices'+(noticeCount?(' ('+noticeCount+')'):'')+'</button>'+
+            '<button class="link-btn" style="margin:0;" onclick="App.switchMode(\''+other+'\')">'+otherLabel+'</button>'+
+          '</div>'+
+        '</div>'+
+      '</div>'
+    );
+  }
+
+  function renderModeChooser(){
+    return (
+      '<div class="kiosk">'+
+        '<div class="card kiosk-card">'+
+          '<img src="'+MTDATA_LOGO_DATAURI+'" alt="MTData" class="brand-logo" style="height:56px;margin:0 auto 16px;">'+
+          '<div class="kiosk-title">Shift Floor</div>'+
+          '<div class="kiosk-sub">Is this the worker tablet, or the manager dashboard?</div>'+
+          '<div class="kiosk-body">'+
+            '<button class="btn btn-primary" onclick="App.switchMode(\'worker\')">This is a Worker Tablet</button>'+
+            '<button class="btn btn-ghost" onclick="App.switchMode(\'manager\')">This is the Manager Dashboard</button>'+
+          '</div>'+
+        '</div>'+
+      '</div>'
+    );
+  }
+
+  function renderMessageArea(){
+    if (!STATE) return "";
+    const items = [];
+    const mode = getDeviceMode();
+    const ackedNotices = ackGet("td_ackNotices");
+    const notices = ui.recallNotices ? STATE.notices.slice() : STATE.notices.filter(function(n){ return ackedNotices.indexOf(n.id)===-1; });
+    notices.forEach(function(n){ items.push({ kind:"notice", id:n.id, text:n.text, ts:n.ts }); });
+
+    if (mode === "manager") {
+      const identity = getMgrIdentity();
+      if (identity) {
+        const ackedMgr = ackGet("td_ackMgrNotices");
+        STATE.managerNotices.filter(function(n){ return n.by !== identity && ackedMgr.indexOf(n.id)===-1; })
+          .forEach(function(n){ items.push({ kind:"mgrnotice", id:n.id, text:n.text, ts:n.ts }); });
+      }
+    }
+    if (mode === "worker") {
+      const wid = getAssignedWorkerId();
+      const ackedMsgs = ackGet("td_ackWorkerMsgs");
+      STATE.workerMessages.filter(function(m){ return m.workerId===wid && ackedMsgs.indexOf(m.id)===-1; })
+        .forEach(function(m){ items.push({ kind:"msg", id:m.id, text:m.text, ts:m.ts }); });
+      const ackedAsg = ackGet("td_ackAssignments");
+      STATE.assignments.filter(function(a){ return a.workerIds.indexOf(wid)>-1 && ackedAsg.indexOf(a.id)===-1; })
+        .forEach(function(a){
+          const t = findTask(a.taskId);
+          items.push({ kind:"assign", id:a.id, text:"📌 Priority today: "+(t?t.name:"a job")+(a.note?" — "+a.note:""), ts:a.ts });
+        });
+    }
+    if (!items.length) return "";
+    items.sort(function(a,b){ return new Date(b.ts) - new Date(a.ts); });
+    const rows = items.map(function(it){
+      return '<div class="card banner"><span>'+escapeHtml(it.text)+'</span>'+
+        '<button class="chip-btn" onclick="App.ackItem(\''+it.kind+'\',\''+it.id+'\')">Got it</button></div>';
+    }).join("");
+    return '<div class="shell" style="padding-top:0;padding-bottom:0;">'+rows+'</div>';
+  }
+
+  /* ---------------- worker flow ---------------- */
+  function renderWorker(){
+    const assignedId = getAssignedWorkerId();
+    let screen = ui.screen;
+    if (!assignedId && screen !== "pickOwner") screen = "pickOwner";
+    if (assignedId && !screen) screen = "confirmOwner";
+
+    switch(screen){
+      case "pickOwner": return kioskShell(pickOwnerBody());
+      case "confirmOwner": return kioskShell(confirmOwnerBody(assignedId));
+      case "pickTask": return kioskShell(pickTaskBody());
+      case "otherJobLabel": return kioskShell(otherJobLabelBody());
+      case "enterMade": return kioskShell(enterMadeBody());
+      case "enterFaults": return kioskShell(enterFaultsBody());
+      case "scanSerials": return kioskShell(scanSerialsBody());
+      case "askAnother": return kioskShell(askAnotherBody());
+      default: return kioskShell(confirmOwnerBody(assignedId));
+    }
+  }
+  function kioskShell(inner){ return '<div class="kiosk"><div class="card kiosk-card">'+inner+'</div></div>'; }
+  function taskLabelForUi(){
+    if (ui.taskId === "__other__") return ui.otherLabel || "Other job";
+    const t = findTask(ui.taskId);
+    return t ? t.name : "Task";
+  }
+
+  function pickOwnerBody(){
+    const workers = activeWorkers();
+    if (!workers.length) {
+      return '<div class="kiosk-eyebrow">Setup needed</div><div class="kiosk-title">No workers yet</div>'+
+        '<div class="kiosk-sub">Ask the manager to add workers from the Manager Dashboard first.</div>';
+    }
+    const opts = workers.map(function(w){ return '<option value="'+w.id+'">'+escapeHtml(w.name)+'</option>'; }).join("");
+    return (
+      '<div class="kiosk-eyebrow">Tablet setup</div>'+
+      '<div class="kiosk-title">Who does this tablet belong to?</div>'+
+      '<div class="kiosk-sub">Pick your name once — this tablet will remember you.</div>'+
+      '<div class="kiosk-body">'+
+        '<select class="big" id="ownerSelect">'+opts+'</select>'+
+        '<button class="btn btn-primary" onclick="App.confirmOwnerPick()">This Is My Tablet</button>'+
+      '</div>'
+    );
+  }
+  function confirmOwnerBody(workerId){
+    const w = findWorker(workerId);
+    if (!w) { setAssignedWorkerId(null); return pickOwnerBody(); }
+    return (
+      '<div class="kiosk-eyebrow">Quick check</div>'+
+      '<div class="kiosk-title">Hi '+escapeHtml(w.name)+', is this you?</div>'+
+      '<div class="kiosk-sub">Confirm it’s your tablet before logging today’s numbers.</div>'+
+      '<div class="kiosk-body">'+
+        '<button class="btn btn-primary" onclick="App.goto(\'pickTask\')">Yes, that’s me</button>'+
+        '<button class="btn btn-ghost" onclick="App.changeOwner()">Not me — change worker</button>'+
+      '</div>'
+    );
+  }
+  function pickTaskBody(){
+    const tasks = activeTasks();
+    if (!tasks.length) {
+      return '<div class="kiosk-eyebrow">Setup needed</div><div class="kiosk-title">No tasks yet</div>'+
+        '<div class="kiosk-sub">Ask the manager to add tasks from the Manager Dashboard first.</div>';
+    }
+    const opts = tasks.map(function(t){ return '<option value="'+t.id+'">'+escapeHtml(t.name)+'</option>'; }).join("")+
+      '<option value="__other__">Other job not in the list</option>';
+    const owner = findWorker(getAssignedWorkerId());
+    const switchLink = isReassignOpen()
+      ? '<button class="link-btn" onclick="App.changeOwner()">Not '+escapeHtml(owner?owner.name:"")+'? Switch worker</button>'
+      : "";
+    return (
+      '<div class="kiosk-eyebrow">Step 1 of 2</div>'+
+      '<div class="kiosk-title">What do you want to update?</div>'+
+      '<div class="kiosk-sub">Choose the task you just worked on.</div>'+
+      '<div class="kiosk-body">'+
+        '<select class="big" id="taskSelect">'+opts+'</select>'+
+        '<button class="btn btn-primary" onclick="App.pickTask()">Next</button>'+
+        switchLink+
+      '</div>'
+    );
+  }
+  function otherJobLabelBody(){
+    return (
+      '<div class="kiosk-eyebrow">Other job</div>'+
+      '<div class="kiosk-title">What job did you do?</div>'+
+      '<div class="kiosk-sub">Type it in — the manager will match it to a job.</div>'+
+      '<div class="kiosk-body">'+
+        '<input class="big" type="text" id="otherJobInput" placeholder="e.g. touch-up on power board" autofocus>'+
+        '<button class="btn btn-primary" onclick="App.submitOtherLabel()">Next</button>'+
+        '<button class="link-btn" onclick="App.goto(\'pickTask\')">Back</button>'+
+      '</div>'
+    );
+  }
+  function enterMadeBody(){
+    return (
+      '<div class="task-name-tag">'+escapeHtml(taskLabelForUi())+'</div>'+
+      '<div class="kiosk-title" style="margin-top:12px;">How many tested or made?</div>'+
+      '<div class="kiosk-sub">Enter the total quantity for this update.</div>'+
+      '<div class="kiosk-body">'+
+        '<input class="big" type="number" inputmode="numeric" min="0" id="madeInput" data-autofocus="1" placeholder="0">'+
+        '<button class="btn btn-primary" onclick="App.submitMade()">Next</button>'+
+        '<button class="link-btn" onclick="App.goto(\'pickTask\')">Back</button>'+
+      '</div>'
+    );
+  }
+  function enterFaultsBody(){
+    const isSerialTask = ui.taskId === STATE.serialTaskId;
+    const btnLabel = isSerialTask ? "Next" : "Submit";
+    const btnAction = isSerialTask ? "App.goScanSerials()" : "App.submitFaults()";
+    const task = findTask(ui.taskId);
+    const isTouchup = task && Object.prototype.hasOwnProperty.call(TOUCHUP_PARTS, task.name.trim().toLowerCase());
+    let question = "How many failed or faulty?";
+    let subLabel = "Out of the "+ui.made+" just entered.";
+    if (isTouchup) {
+      const ppu = task.partsPerUnit;
+      if (ppu) {
+        question = "How many failed (out of up to "+ppu+" possible per unit)?";
+        subLabel = "Up to "+(ui.made*ppu)+" possible across "+ui.made+" unit(s).";
+      } else {
+        question = "How many failed or faulty?";
+        subLabel = "Parts-per-unit isn’t set for this job yet — ask the manager to set it in Settings.";
+      }
+    }
+    return (
+      '<div class="task-name-tag">'+escapeHtml(taskLabelForUi())+'</div>'+
+      '<div class="kiosk-title" style="margin-top:12px;">'+question+'</div>'+
+      '<div class="kiosk-sub">'+subLabel+'</div>'+
+      '<div class="kiosk-body">'+
+        '<input class="big" type="number" inputmode="numeric" min="0" id="faultsInput" data-autofocus="1" placeholder="0">'+
+        '<button class="btn btn-primary" onclick="'+btnAction+'">'+btnLabel+'</button>'+
+        '<button class="link-btn" onclick="App.goto(\'enterMade\')">Back</button>'+
+      '</div>'
+    );
+  }
+  function scanSerialsBody(){
+    const needed = Math.max(0, ui.made - ui.faults);
+    const list = ui.serialsList || [];
+    const rows = list.map(function(s, idx){
+      return '<div class="list-row"><div class="name num">'+escapeHtml(s)+'</div><button class="chip-btn danger" onclick="App.removeScannedSerial('+idx+')">Remove</button></div>';
+    }).join("");
+    const remaining = needed - list.length;
+    const canSubmit = list.length === needed;
+    const errVal = ui.serialError ? escapeHtml(ui.serialError.value) : "";
+    const errClass = ui.serialError ? " input-error" : "";
+    const errMsg = ui.serialError ? '<div style="color:var(--bad);font-size:13px;margin-top:-8px;">'+escapeHtml(ui.serialError.message)+'</div>' : "";
+    return (
+      '<div class="task-name-tag">7000AI PROVISIONING</div>'+
+      '<div class="kiosk-title" style="margin-top:12px;">Scan or type each passed unit’s serial number</div>'+
+      '<div class="kiosk-sub">Only good/passed units need one. '+list.length+' of '+needed+' entered'+(remaining>0?(' — '+remaining+' to go'):'')+'</div>'+
+      '<div class="kiosk-body">'+
+        '<input class="big'+errClass+'" type="text" id="serialInput" data-autofocus="1" value="'+errVal+'" placeholder="Scan or type serial, then Enter" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addScannedSerial();}">'+
+        errMsg+
+        '<button class="btn btn-ghost" onclick="App.addScannedSerial()">Add Serial</button>'+
+        (rows ? '<div class="confirm-summary" style="max-height:220px;overflow-y:auto;">'+rows+'</div>' : "")+
+        '<button class="btn btn-primary" '+(canSubmit?"":"disabled")+' onclick="App.submitFaults()">Submit</button>'+
+        '<button class="link-btn" onclick="App.goto(\'enterFaults\')">Back</button>'+
+      '</div>'
+    );
+  }
+  function askAnotherBody(){
+    const label = taskLabelForUi();
+    let eyebrow = "Saved ✅", headline = "Logged for "+escapeHtml(ui.resolvedName || label), note = "";
+    if (ui.pendingReview) {
+      eyebrow = "Sent ✅";
+      headline = "Submitted for review";
+      note = '<div class="kiosk-sub">“'+escapeHtml(label)+'” isn’t matched to a job yet — the manager will review it shortly.</div>';
+    } else if (ui.resolvedName && ui.resolvedName !== label) {
+      note = '<div class="kiosk-sub">Matched automatically to “'+escapeHtml(ui.resolvedName)+'”.</div>';
+    }
+    if (ui.serialsCount != null) {
+      note += '<div class="kiosk-sub" style="margin-top:-14px;">'+ui.serialsCount+' serial number'+(ui.serialsCount===1?"":"s")+' recorded.</div>';
+    }
+    return (
+      '<div class="kiosk-eyebrow">'+eyebrow+'</div>'+
+      '<div class="kiosk-title">'+headline+'</div>'+
+      note+
+      '<div class="confirm-summary">'+
+        '<div><span>Made / tested</span><b>'+ui.made+'</b></div>'+
+        '<div><span>Failed / faulty</span><b>'+ui.faults+'</b></div>'+
+      '</div>'+
+      '<div class="kiosk-sub">Want to enter another job?</div>'+
+      '<div class="btn-row">'+
+        '<button class="btn btn-ghost" onclick="App.anotherJob(false)">No, done</button>'+
+        '<button class="btn btn-primary" onclick="App.anotherJob(true)">Yes</button>'+
+      '</div>'
+    );
+  }
+
+  /* ---------------- manager dashboard ---------------- */
+  function renderManager(){
+    if (!getMgrIdentity()) return kioskShell(pinBody());
+    const screen = ui.mScreen || "dashboard";
+    let body = "";
+    if (screen === "tasks") body = managerTasksPanel();
+    else if (screen === "workers") body = managerWorkersPanel();
+    else if (screen === "settings") body = managerSettingsPanel();
+    else if (screen === "review") body = managerReviewPanel();
+    else if (screen === "notices") body = managerNoticesPanel();
+    else if (screen === "assigner") body = managerAssignerPanel();
+    else if (screen === "summary") body = managerSummaryPanel();
+    else if (screen === "entries") body = managerEntriesPanel();
+    else body = managerDashboardBody();
+
+    let modal = "";
+    if (ui.modal === "enterFor") modal = enterForModal();
+    else if (ui.modal === "reassign") modal = reassignModal();
+    return '<div class="shell">'+body+'</div>'+modal;
+  }
+  function pinBody(){
+    const err = ui.pinError ? '<div style="color:var(--bad);font-size:13px;margin-top:-8px;">Incorrect PIN. Try again.</div>' : "";
+    return (
+      '<div class="kiosk-eyebrow">Manager access</div>'+
+      '<div class="kiosk-title">Enter the dashboard PIN</div>'+
+      '<div class="kiosk-sub">This area is for the manager only.</div>'+
+      '<div class="kiosk-body">'+
+        '<input class="big" type="password" inputmode="numeric" id="pinInput" data-autofocus="1" placeholder="••••">'+
+        err+
+        '<button class="btn btn-primary" onclick="App.submitPin()">Unlock</button>'+
+        '<button class="link-btn" onclick="App.switchMode(\'worker\')">Back to Worker view</button>'+
+      '</div>'
+    );
+  }
+
+  function taskCardHtml(t, curAgg, opts){
+    opts = opts || {};
+    const a = curAgg[t.id];
+    const made = a?a.made:0, faults = a?a.faults:0;
+    const ppu = t.partsPerUnit || 1;
+    const y = yieldPct(made,faults,ppu), f = faultPct(made,faults,ppu);
+    const yTier = tierFor("yield", y), fTier = tierFor("fault", f);
+    let recent = '<div class="task-recent">No updates yet this week.</div>';
+    if (a && a.lastEntry) {
+      const w = findWorker(a.lastEntry.workerId);
+      const whoText = a.lastEntry.by === "manager" ? "entered by manager" : escapeHtml(w?w.name:"unknown");
+      recent = '<div class="task-recent">+<b>'+a.lastEntry.made+'</b> made / <b>'+a.lastEntry.faults+'</b> faults — '+fmtRelTime(a.lastEntry.ts)+' · '+whoText+'</div>';
+    }
+    const pinBtn = opts.pinned
+      ? '<button class="chip-btn" onclick="App.unpinTask('+opts.slot+')">Unpin</button>'
+      : '<button class="chip-btn" onclick="App.pinTask(\''+t.id+'\')">📌 Pin</button>';
+    const fColor = f==null ? "inherit" : (fTier==="good"?"var(--good)":fTier==="warn"?"var(--warn)":"var(--bad)");
+    return (
+      '<div class="card task-card" draggable="true" ondragstart="event.dataTransfer.setData(\'text/plain\',\''+t.id+'\')">'+
+        '<div class="task-card-head"><h3>'+escapeHtml(t.name)+'</h3>'+
+          (a ? '<span class="badge '+yTier+'">'+fmtPct(y)+' yield</span>' : '<span class="badge idle">idle</span>')+
+        '</div>'+
+        '<div class="task-metrics">'+
+          '<div class="task-metric"><div class="n">'+made+'</div><div class="l">Made</div></div>'+
+          '<div class="task-metric"><div class="n">'+faults+'</div><div class="l">Faults</div></div>'+
+          '<div class="task-metric"><div class="n" style="color:'+fColor+'">'+fmtPct(f)+'</div><div class="l">Fault rate</div></div>'+
+        '</div>'+
+        recent+
+        '<div style="margin-top:10px;">'+pinBtn+'</div>'+
+      '</div>'
+    );
+  }
+  function priorityWatchSection(curAgg){
+    const collapsed = isPriorityCollapsed();
+    const slots = getPriorityPins();
+    const header = '<div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;">'+
+      '<span>Priority Watch</span>'+
+      '<button class="link-btn" style="margin:0;" onclick="App.togglePriorityCollapse()">'+(collapsed?"▸ Expand":"▾ Collapse")+'</button>'+
+    '</div>';
+    if (collapsed) {
+      const names = slots.map(function(id){ return id ? (findTask(id)||{}).name : null; }).filter(Boolean);
+      const summary = names.length ? names.join(" · ") : "No jobs pinned yet";
+      return header + '<div class="card" style="padding:14px 18px;color:var(--muted);font-size:14px;">'+escapeHtml(summary)+'</div>';
+    }
+    const cells = slots.map(function(taskId, idx){
+      if (!taskId) {
+        return '<div class="card slot-empty" ondragover="event.preventDefault()" ondrop="App.dropOnSlot(event,'+idx+')">Drag a task here'+
+          '<div style="font-size:12px;margin-top:4px;">or tap “📌 Pin” on any task card</div></div>';
+      }
+      const t = findTask(taskId);
+      if (!t) return '<div class="card slot-empty">(removed)</div>';
+      return taskCardHtml(t, curAgg, { pinned:true, slot:idx });
+    });
+    return header + '<div class="task-grid" ondragover="event.preventDefault()">'+cells.join("")+'</div>';
+  }
+
+  function serialPanelSection(curKey){
+    if (!STATE.serialTaskId) return "";
+    const collapsed = isSerialsCollapsed();
+    const showAll = !!ui.serialsShowAll;
+    const list = (showAll ? STATE.serials.slice() : STATE.serials.filter(function(s){ return weekKeyOf(s.ts)===curKey; }))
+      .sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
+    const header = '<div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">'+
+      '<span>Scanned Serial Numbers · '+(showAll?"All-Time":"This Week")+' ('+list.length+')</span>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;">'+
+        '<button class="link-btn" style="margin:0;" onclick="App.toggleSerialsShowAll()">'+(showAll?"Show This Week":"Show All-Time")+'</button>'+
+        '<button class="link-btn" style="margin:0;" onclick="App.toggleSerialsCollapse()">'+(collapsed?"▸ Expand":"▾ Collapse")+'</button>'+
+      '</div>'+
+    '</div>';
+    if (collapsed) return header;
+
+    const rows = list.map(function(s){
+      const w = findWorker(s.workerId);
+      if (ui.editingSerialId === s.id) {
+        return '<div class="list-row"><input type="text" id="editSerialInput" value="'+escapeHtml(s.serial)+'" style="flex:1;padding:8px 10px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+          '<div class="actions"><button class="chip-btn" onclick="App.saveSerialEdit(\''+s.id+'\')">Save</button><button class="chip-btn" onclick="App.cancelSerialEdit()">Cancel</button></div></div>';
+      }
+      return '<div class="list-row"><div><div class="num">'+escapeHtml(s.serial)+'</div><div style="font-size:12px;color:var(--muted);">'+escapeHtml(w?w.name:"added by manager")+' · '+fmtRelTime(s.ts)+'</div></div>'+
+        '<div class="actions"><button class="chip-btn" onclick="App.startSerialEdit(\''+s.id+'\')">Edit</button><button class="chip-btn danger" onclick="App.deleteSerial(\''+s.id+'\')">Delete</button></div></div>';
+    }).join("");
+
+    return header +
+      '<div class="card panel">'+
+        '<div class="row-form">'+
+          '<input type="text" id="newSerialManual" placeholder="Add a serial manually">'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.addSerialManual()">Add</button>'+
+          '<button class="chip-btn" onclick="App.copySerials()">📋 Copy List</button>'+
+        '</div>'+
+        (rows || '<div style="color:var(--muted);font-size:14px;">No serial numbers logged yet.</div>')+
+      '</div>';
+  }
+
+  function resolveNamesToIds(names){
+    const ids = [];
+    (names||[]).forEach(function(name){
+      const key = name.trim().toLowerCase();
+      const t = STATE.tasks.find(function(x){ return x.name.trim().toLowerCase()===key; });
+      if (t) ids.push(t.id);
+      else console.warn('Yield group task name did not resolve to any task: "'+name+'"');
+    });
+    return ids;
+  }
+  function comboRowHtml(label, taskIds, curAgg, deleteBtn){
+    const tot = comboTotals(taskIds, curAgg);
+    const yTier = tierFor("yield", tot.yield), fTier = tierFor("fault", tot.faultRate);
+    return '<div class="list-row"><div class="name">'+escapeHtml(label)+'</div>'+
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'+
+        '<span class="badge '+yTier+'">'+fmtPct(tot.yield)+' yield</span>'+
+        '<span class="badge '+fTier+'">'+fmtPct(tot.faultRate)+' fault</span>'+
+        (deleteBtn||"")+
+      '</div></div>';
+  }
+  function comboAddForm(){
+    const checks = STATE.tasks.map(function(t){
+      return '<label style="display:flex;align-items:center;gap:8px;padding:4px 0;"><input type="checkbox" class="comboTaskChk" value="'+t.id+'"> '+escapeHtml(t.name)+'</label>';
+    }).join("");
+    return '<div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:14px;">'+
+      '<div class="field"><label>Combination name</label><input type="text" id="comboName" placeholder="e.g. Final Assembly Yield"></div>'+
+      '<div class="field"><label>Tasks included</label><div style="max-height:220px;overflow-y:auto;">'+checks+'</div></div>'+
+      '<div class="btn-row"><button class="btn btn-ghost" onclick="App.toggleAddCombo()">Cancel</button>'+
+      '<button class="btn btn-primary" onclick="App.saveNewCombo()">Save Combination</button></div>'+
+    '</div>';
+  }
+  function totalYieldSection(curAgg){
+    const collapsed = isYieldCollapsed();
+    const header = '<div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;">'+
+      '<span>Total Weekly Yield</span>'+
+      '<button class="link-btn" style="margin:0;" onclick="App.toggleYieldCollapse()">'+(collapsed?"▸ Expand":"▾ Collapse")+'</button>'+
+    '</div>';
+    if (collapsed) return header;
+    const smtIds = resolveNamesToIds(SMT_YIELD_NAMES);
+    const thIds = resolveNamesToIds(THROUGHHOLE_YIELD_NAMES);
+    const testIds = resolveNamesToIds(TEST_YIELD_NAMES);
+    let rows = comboRowHtml("SMT Yield", smtIds, curAgg) +
+      comboRowHtml("Through-hole Yield", thIds, curAgg) +
+      comboRowHtml("Test Yield", testIds, curAgg);
+    (STATE.combos||[]).forEach(function(c){
+      rows += comboRowHtml(c.name, c.taskIds, curAgg, '<button class="chip-btn danger" onclick="App.deleteCombo(\''+c.id+'\')">🗑 Delete</button>');
+    });
+    let addSection = "";
+    if ((STATE.combos||[]).length < 5) {
+      addSection = ui.addingCombo ? comboAddForm()
+        : '<button class="link-btn" style="margin-top:6px;" onclick="App.toggleAddCombo()">+ Add combination</button>';
+    }
+    return header + '<div class="card panel">' + rows + addSection + '</div>';
+  }
+  function reassignModal(){
+    const active = isReassignOpen();
+    const remainMin = active ? Math.max(1, Math.ceil((new Date(STATE.reassignUntil).getTime()-Date.now())/60000)) : 0;
+    return (
+      '<div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">'+
+        '<div class="card modal">'+
+          '<h3 style="margin-bottom:16px;">Reassignment Window</h3>'+
+          (active ?
+            ('<div class="confirm-summary"><div><span>Status</span><b>Open — ~'+remainMin+' min left</b></div></div>'+
+            '<div style="color:var(--muted);font-size:13px;margin-bottom:14px;">Every worker tablet can currently switch to a different worker.</div>'+
+            '<div class="btn-row"><button class="btn btn-danger" onclick="App.closeReassignWindow()">Close Now</button>'+
+            '<button class="btn btn-ghost" onclick="App.closeModal()">Done</button></div>')
+            :
+            ('<div style="color:var(--muted);font-size:13px;margin-bottom:14px;">Temporarily let any worker tablet switch to a different worker. This applies to every tablet — individual tablets can’t be targeted.</div>'+
+            '<div class="field"><label>Quick durations</label><div class="btn-row">'+
+              '<button class="btn btn-ghost" onclick="App.openReassignWindow(15)">15 min</button>'+
+              '<button class="btn btn-ghost" onclick="App.openReassignWindow(30)">30 min</button>'+
+              '<button class="btn btn-ghost" onclick="App.openReassignWindow(60)">60 min</button>'+
+            '</div></div>'+
+            '<div class="field"><label>Or custom minutes</label><div style="display:flex;gap:10px;">'+
+              '<input type="number" min="1" id="reassignMinutes" placeholder="e.g. 45" style="flex:1;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+              '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.openReassignWindowCustom()">Open</button>'+
+            '</div></div>'+
+            '<div class="btn-row"><button class="btn btn-ghost" onclick="App.closeModal()">Cancel</button></div>')
+          )+
+        '</div>'+
+      '</div>'
+    );
+  }
+  function managerEntriesPanel(){
+    const entries = STATE.entries.slice().sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
+    const rows = entries.map(function(e){
+      const w = findWorker(e.workerId);
+      const t = findTask(e.taskId);
+      const workerName = w ? w.name : (e.by==="manager" ? "(manager entry)" : "Unknown worker");
+      const taskName = t ? t.name : "(deleted task)";
+      if (ui.editingEntryId === e.id) {
+        return '<div class="list-row" style="flex-wrap:wrap;">'+
+          '<div style="flex:1;min-width:200px;"><b>'+escapeHtml(workerName)+'</b> — '+escapeHtml(taskName)+'</div>'+
+          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'+
+            '<input type="number" min="0" id="editEntryMade-'+e.id+'" value="'+e.made+'" style="width:74px;padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);"> made'+
+            '<input type="number" min="0" id="editEntryFaults-'+e.id+'" value="'+e.faults+'" style="width:74px;padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);"> faults'+
+            '<button class="chip-btn" onclick="App.saveEntryEdit(\''+e.id+'\')">Save</button>'+
+            '<button class="chip-btn" onclick="App.cancelEntryEdit()">Cancel</button>'+
+          '</div></div>';
+      }
+      if (ui.confirmDeleteEntryId === e.id) {
+        return '<div class="list-row"><div>Delete this entry for <b>'+escapeHtml(workerName)+'</b> — '+escapeHtml(taskName)+'?</div>'+
+          '<div class="actions"><button class="chip-btn danger" onclick="App.deleteEntry(\''+e.id+'\')">Confirm Delete</button>'+
+          '<button class="chip-btn" onclick="App.cancelDeleteEntry()">Cancel</button></div></div>';
+      }
+      return '<div class="list-row"><div><div><b>'+escapeHtml(workerName)+'</b> — '+escapeHtml(taskName)+'</div>'+
+        '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · '+fmtRelTime(e.ts)+'</div></div>'+
+        '<div class="actions"><button class="chip-btn" onclick="App.startEntryEdit(\''+e.id+'\')">Edit</button>'+
+        '<button class="chip-btn danger" onclick="App.startDeleteEntry(\''+e.id+'\')">Delete</button></div></div>';
+    }).join("");
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Entry Log</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div style="color:var(--muted);font-size:13px;margin-bottom:12px;">Every logged entry, most recent first. Edits and deletes apply immediately — no time limit.</div>'+
+        (rows || '<div style="color:var(--muted);font-size:14px;">No entries logged yet.</div>')+
+      '</div>'
+    );
+  }
+  function managerDashboardBody(){
+    const now = new Date();
+    const curStart = weekStartFor(now);
+    const curKey = weekKeyOf(now);
+    const prevStart = new Date(curStart); prevStart.setDate(prevStart.getDate()-7);
+    const prevKey = weekKeyOf(prevStart);
+
+    const curAgg = aggregateWeek(curKey);
+    const prevAgg = aggregateWeek(prevKey);
+    const pendingCount = STATE.pendingRequests.filter(function(r){ return r.status==="pending"; }).length;
+
+    const headlineTask = findTask(STATE.headlineTaskId);
+    const hAgg = headlineTask ? curAgg[headlineTask.id] : null;
+    const hMade = hAgg?hAgg.made:0, hFaults = hAgg?hAgg.faults:0;
+    const hPpu = (headlineTask && headlineTask.partsPerUnit) || 1;
+    const hYield = yieldPct(hMade,hFaults,hPpu), hFault = faultPct(hMade,hFaults,hPpu);
+
+    let reassignBanner = "";
+    if (isReassignOpen()) {
+      const mins = Math.max(1, Math.ceil((new Date(STATE.reassignUntil).getTime()-Date.now())/60000));
+      reassignBanner = '<div class="card banner" style="background:var(--warn-soft);"><span>🔓 Reassignment window open — any worker tablet can switch worker. Closes in ~'+mins+' min.</span><button class="chip-btn" onclick="App.closeReassignWindow()">Close Now</button></div>';
+    }
+
+    const tasks = activeTasks().slice().sort(function(a,b){
+      const la = curAgg[a.id] ? new Date(curAgg[a.id].lastTs).getTime() : -1;
+      const lb = curAgg[b.id] ? new Date(curAgg[b.id].lastTs).getTime() : -1;
+      if (la !== lb) return lb - la;
+      return a.name.localeCompare(b.name);
+    });
+    const cards = tasks.map(function(t){ return taskCardHtml(t, curAgg, {}); }).join("");
+
+    const prevTasks = STATE.tasks.filter(function(t){ return prevAgg[t.id]; });
+    let prevMade=0, prevFaults=0;
+    const prevRows = prevTasks.map(function(t){
+      const a = prevAgg[t.id];
+      const ppu = t.partsPerUnit || 1;
+      prevMade += a.made; prevFaults += a.faults;
+      return '<tr><td>'+escapeHtml(t.name)+'</td><td class="num">'+a.made+'</td><td class="num">'+a.faults+'</td>'+
+        '<td class="num">'+fmtPct(yieldPct(a.made,a.faults,ppu))+'</td><td class="num">'+fmtPct(faultPct(a.made,a.faults,ppu))+'</td></tr>';
+    }).join("");
+
+    return (
+      reassignBanner+
+      '<div class="card week-banner">'+
+        '<div><h2>Current Week</h2><div class="sub">'+fmtRange(curStart)+' · resets Saturday</div></div>'+
+        '<div class="toolbar">'+
+          '<button onclick="App.openModal(\'enterFor\')">+ Enter for a Worker</button>'+
+          '<button onclick="App.gotoManager(\'review\')">Review Jobs'+(pendingCount?(' ('+pendingCount+')'):'')+'</button>'+
+          '<button onclick="App.gotoManager(\'notices\')">Notice Board</button>'+
+          '<button onclick="App.gotoManager(\'assigner\')">Task Assigner</button>'+
+          '<button onclick="App.gotoManager(\'summary\')">Worker Summary</button>'+
+          '<button onclick="App.gotoManager(\'entries\')">Entry Log</button>'+
+          '<button onclick="App.gotoManager(\'tasks\')">Manage Tasks</button>'+
+          '<button onclick="App.gotoManager(\'workers\')">Manage Workers</button>'+
+          '<button onclick="App.gotoManager(\'settings\')">Settings</button>'+
+          '<button onclick="App.openModal(\'reassign\')">🔓 Open Reassignment Window</button>'+
+          '<button onclick="App.downloadWeeklySummary()">⬇ Download Weekly Summary</button>'+
+          '<button onclick="App.downloadMonthlySummary()">⬇ Download Monthly Summary</button>'+
+        '</div>'+
+      '</div>'+
+
+      priorityWatchSection(curAgg)+
+
+      '<div style="margin-top:26px;">'+totalYieldSection(curAgg)+'</div>'+
+
+      '<div class="section-title" style="margin-top:26px;">'+escapeHtml(headlineTask?headlineTask.name:"Headline job")+'</div>'+
+      '<div class="overall-row">'+
+        '<div class="card stat-tile"><div class="label">Total 7000AI Made</div><div class="value">'+hMade+'</div></div>'+
+        '<div class="card stat-tile"><div class="label">Total Faults</div><div class="value">'+hFaults+'</div></div>'+
+        '<div class="card stat-tile"><div class="label">Yield</div><div class="value '+tierFor("yield",hYield)+'">'+fmtPct(hYield)+'</div></div>'+
+        '<div class="card stat-tile"><div class="label">Fault Rate</div><div class="value '+tierFor("fault",hFault)+'">'+fmtPct(hFault)+'</div></div>'+
+      '</div>'+
+
+      serialPanelSection(curKey)+
+
+      '<div class="section-title">Tasks · most recently updated first</div>'+
+      (cards ? '<div class="task-grid">'+cards+'</div>' : '<div class="card" style="padding:20px;color:var(--muted);">No tasks yet — add one under Manage Tasks.</div>')+
+
+      '<div class="section-title">Last Week Summary</div>'+
+      '<div class="card panel">'+
+        '<div class="panel-head"><div><h3 style="font-size:18px;">'+fmtRange(prevStart)+'</h3></div>'+
+          '<div class="num" style="font-size:14px;color:var(--muted);">Total: '+prevMade+' made · '+prevFaults+' faults · '+fmtPct(yieldPct(prevMade,prevFaults))+' yield</div>'+
+        '</div>'+
+        (prevRows ?
+          '<div class="table-wrap"><table class="data-table"><thead><tr><th>Task</th><th class="num">Made</th><th class="num">Faults</th><th class="num">Yield</th><th class="num">Fault Rate</th></tr></thead><tbody>'+prevRows+'</tbody></table></div>'
+          : '<div style="color:var(--muted);font-size:14px;">No activity recorded last week.</div>')+
+      '</div>'+
+
+      '<div class="footer-note"><span>PIN-protected · visible to the manager only</span><button class="link-btn" onclick="App.logoutManager()">Log out of Manager view</button></div>'
+    );
+  }
+
+  function managerTasksPanel(){
+    const rows = STATE.tasks.map(function(t){
+      if (ui.editingTaskId === t.id) {
+        return '<div class="list-row"><input type="text" id="editTaskName" value="'+escapeHtml(t.name)+'" style="flex:1;padding:8px 10px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+          '<div class="actions"><button class="chip-btn" onclick="App.saveTaskEdit(\''+t.id+'\')">Save</button>'+
+          '<button class="chip-btn" onclick="App.cancelTaskEdit()">Cancel</button></div></div>';
+      }
+      return (
+        '<div class="list-row" draggable="true" ondragstart="event.dataTransfer.setData(\'text/plain\',\''+t.id+'\')" ondragover="event.preventDefault()" ondrop="App.reorderTask(event,\''+t.id+'\')">'+
+        '<div class="name">⠿ '+escapeHtml(t.name)+(t.active?'':' <span class="inactive-tag">(hidden)</span>')+'</div>'+
+        '<div class="actions">'+
+          '<button class="chip-btn" onclick="App.toggleTask(\''+t.id+'\')">'+(t.active?'Hide':'Unhide')+'</button>'+
+          '<button class="chip-btn" onclick="App.startTaskEdit(\''+t.id+'\')">Edit</button>'+
+          '<button class="chip-btn danger" onclick="App.deleteTask(\''+t.id+'\')">Delete</button>'+
+        '</div></div>'
+      );
+    }).join("");
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Manage Tasks</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div class="row-form">'+
+          '<input type="text" id="newTaskName" placeholder="New task name" style="flex:1;min-width:180px;">'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.addTask()">Add Task</button>'+
+        '</div>'+
+        '<div style="color:var(--muted);font-size:13px;margin-bottom:10px;">Drag ⠿ a row to reorder — this also changes the order in the worker’s dropdown.</div>'+
+        rows+
+      '</div>'
+    );
+  }
+  function managerWorkersPanel(){
+    const rows = STATE.workers.map(function(w){
+      return (
+        '<div class="list-row"><div class="name">'+escapeHtml(w.name)+(w.active?'':' <span class="inactive-tag">(hidden)</span>')+'</div>'+
+        '<div class="actions">'+
+          '<button class="chip-btn" onclick="App.toggleWorker(\''+w.id+'\')">'+(w.active?'Hide':'Unhide')+'</button>'+
+        '</div></div>'
+      );
+    }).join("");
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Manage Workers</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div class="row-form">'+
+          '<input type="text" id="newWorkerName" placeholder="Worker name" style="flex:1;min-width:180px;">'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.addWorker()">Add Worker</button>'+
+        '</div>'+
+        rows+
+      '</div>'
+    );
+  }
+  function standupScheduleSection(){
+    const cfg = STATE.standup || DEFAULT_STANDUP;
+    const dayChecks = DOWS.map(function(label, idx){
+      const checked = (cfg.days||[]).indexOf(idx)>-1 ? " checked" : "";
+      return '<label style="display:inline-flex;align-items:center;gap:5px;padding:4px 8px;">'+
+        '<input type="checkbox" id="standupDay'+idx+'"'+checked+'> '+label+'</label>';
+    }).join("");
+    return (
+      '<div class="section-title" style="margin:22px 0 8px;">Stand-up Meeting Reminder</div>'+
+      '<div class="field">'+
+        '<label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="standupEnabled"'+(cfg.enabled?' checked':'')+'> Remind everyone with a full-screen alert before the meeting</label>'+
+      '</div>'+
+      '<div class="field"><label>Meeting time</label>'+
+        '<div style="display:flex;gap:8px;align-items:center;">'+
+          '<input type="number" min="0" max="23" id="standupHour" value="'+(cfg.hour!=null?cfg.hour:11)+'" style="width:70px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+          '<span style="color:var(--muted);">:</span>'+
+          '<input type="number" min="0" max="59" id="standupMinute" value="'+(cfg.minute!=null?cfg.minute:0)+'" style="width:70px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+          '<span style="color:var(--muted);font-size:13px;">24-hour clock, e.g. 11:00 = 11am</span>'+
+        '</div>'+
+      '</div>'+
+      '<div class="field"><label>Repeats on</label><div>'+dayChecks+'</div></div>'+
+      '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.saveStandupSchedule()">Save Stand-up Schedule</button>'
+    );
+  }
+  function managerSettingsPanel(){
+    const headlineOpts = STATE.tasks.map(function(t){
+      return '<option value="'+t.id+'"'+(t.id===STATE.headlineTaskId?' selected':'')+'>'+escapeHtml(t.name)+'</option>';
+    }).join("");
+    const identity = getMgrIdentity();
+    const isMark = identity === "mark";
+    const me = (STATE.managers||[]).find(function(m){ return m.id===identity; });
+    const other = (STATE.managers||[]).find(function(m){ return m.id!==identity; });
+
+    let pinSection = '<div class="field"><label>Your PIN ('+escapeHtml(me?me.name:"you")+')</label>'+
+      '<div style="display:flex;gap:10px;"><input type="text" inputmode="numeric" id="newPin" placeholder="Enter new PIN" style="flex:1;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+      '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.savePin()">Save</button></div>'+
+    '</div>';
+    if (other) {
+      pinSection += '<div class="field"><label>'+escapeHtml(other.name)+'’s PIN</label>'+
+        '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><span style="color:var(--muted);font-size:13px;">Locked out? Reset it back to the default.</span>'+
+        '<button class="chip-btn" onclick="App.resetOtherPin(\''+other.id+'\')">Reset to 1234</button></div>'+
+      '</div>';
+    }
+
+    const touchupTasks = THROUGHHOLE_YIELD_NAMES.map(function(name){
+      return STATE.tasks.find(function(t){ return t.name.trim().toLowerCase() === name.trim().toLowerCase(); });
+    }).filter(Boolean);
+    const ppuRows = touchupTasks.map(function(t){
+      const val = t.partsPerUnit;
+      if (isMark) {
+        return '<div class="field"><label>'+escapeHtml(t.name)+' — parts per unit</label>'+
+          '<div style="display:flex;gap:10px;"><input type="number" min="1" id="ppuInput-'+t.id+'" value="'+(val?val:"")+'" placeholder="e.g. 20" style="flex:1;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.savePpu(\''+t.id+'\')">Save</button></div>'+
+        '</div>';
+      }
+      return '<div class="field"><label>'+escapeHtml(t.name)+' — parts per unit</label>'+
+        '<div style="padding:10px 12px;color:var(--ink);">'+escapeHtml(val?String(val):"not set")+' <span style="color:var(--muted);font-size:12px;">(read-only — only Mark can change this)</span></div>'+
+      '</div>';
+    }).join("");
+
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Settings</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        pinSection+
+        '<div class="field"><label>Headline summary job (top tiles)</label>'+
+          '<div style="display:flex;gap:10px;"><select id="headlineTaskSelect" style="flex:1;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+headlineOpts+'</select>'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.saveHeadlineTask()">Save</button></div>'+
+        '</div>'+
+        '<div class="section-title" style="margin:22px 0 8px;">Touch-up Parts Per Unit</div>'+
+        ppuRows+
+        '<div class="field"><label>Serial Number Format (7000AI PROVISIONING)</label>'+
+          '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'+
+            '<input type="number" min="1" id="serialLenInput" value="'+(STATE.serialFormat?STATE.serialFormat.totalLength:9)+'" style="width:90px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+            '<span style="color:var(--muted);font-size:13px;">digits total</span>'+
+          '</div>'+
+          '<input type="text" id="serialPrefixInput" value="'+escapeHtml(((STATE.serialFormat&&STATE.serialFormat.prefixes)||[]).join(", "))+'" placeholder="Valid prefixes, comma separated e.g. 7010, 701" style="padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;align-self:flex-start;" onclick="App.saveSerialFormat()">Save Format</button>'+
+        '</div>'+
+        standupScheduleSection()+
+        '<div style="color:var(--muted);font-size:13px;">History is kept forever — the dashboard only changes which week or year it is summarizing.</div>'+
+      '</div>'
+    );
+  }
+  function managerReviewPanel(){
+    const pending = STATE.pendingRequests.filter(function(r){ return r.status==="pending"; })
+      .sort(function(a,b){ return new Date(a.ts)-new Date(b.ts); });
+    const rows = pending.map(function(r){
+      const w = findWorker(r.workerId);
+      const taskOpts = activeTasks().map(function(t){ return '<option value="'+t.id+'">'+escapeHtml(t.name)+'</option>'; }).join("");
+      return (
+        '<div class="card" style="padding:16px 18px;margin-bottom:12px;">'+
+          '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;">'+
+            '<div><b>'+escapeHtml(w?w.name:"Unknown")+'</b> logged “'+escapeHtml(r.label)+'” — '+r.made+' made / '+r.faults+' faults</div>'+
+            '<div style="color:var(--muted);font-size:12px;">'+fmtRelTime(r.ts)+'</div>'+
+          '</div>'+
+          '<div class="row-form" style="margin-top:12px;margin-bottom:0;">'+
+            '<select id="reviewTask-'+r.id+'">'+taskOpts+'</select>'+
+            '<button class="chip-btn" onclick="App.resolvePendingMatch(\''+r.id+'\', document.getElementById(\'reviewTask-'+r.id+'\').value)">Match to This Job</button>'+
+            '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.resolvePendingCreate(\''+r.id+'\')">Create New Job: “'+escapeHtml(r.label)+'”</button>'+
+          '</div>'+
+        '</div>'
+      );
+    }).join("");
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Review Jobs</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        (rows || '<div style="color:var(--muted);font-size:14px;">No jobs waiting for review.</div>')+
+      '</div>'
+    );
+  }
+  function managerNoticesPanel(){
+    const list = STATE.notices.slice().sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); }).map(function(n){
+      return '<div class="list-row"><div><div>'+escapeHtml(n.text)+'</div><div style="font-size:12px;color:var(--muted);">'+fmtRelTime(n.ts)+'</div></div></div>';
+    }).join("");
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Notice Board</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div class="row-form"><input type="text" id="newNoticeText" placeholder="Message for everyone" style="flex:1;min-width:220px;">'+
+        '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.postNotice()">Post Notice</button></div>'+
+        (list || '<div style="color:var(--muted);font-size:14px;">No notices posted yet.</div>')+
+      '</div>'
+    );
+  }
+  function managerAssignerPanel(){
+    const workerChecks = activeWorkers().map(function(w){
+      return '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;"><input type="checkbox" class="asgWorker" value="'+w.id+'"> '+escapeHtml(w.name)+'</label>';
+    }).join("");
+    const taskOpts = activeTasks().map(function(t){ return '<option value="'+t.id+'">'+escapeHtml(t.name)+'</option>'; }).join("");
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Task Assigner</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div style="color:var(--muted);font-size:13px;margin-bottom:12px;">Tell specific workers to prioritize a different job than usual today.</div>'+
+        '<div class="field"><label>Workers</label><div>'+workerChecks+'</div></div>'+
+        '<div class="field"><label>Task to prioritize</label><select id="asgTask">'+taskOpts+'</select></div>'+
+        '<div class="field"><label>Note (optional)</label><input type="text" id="asgNote" placeholder="e.g. Cover the morning run"></div>'+
+        '<button class="btn btn-primary" onclick="App.sendAssignment()">Send</button>'+
+      '</div>'
+    );
+  }
+  function workerRowsTableHtml(byWorker){
+    const workerIds = Object.keys(byWorker);
+    if (!workerIds.length) return '<div style="color:var(--muted);font-size:14px;margin-bottom:18px;">No activity recorded.</div>';
+    workerIds.sort(function(a,b){
+      const wa = findWorker(a), wb = findWorker(b);
+      return (wa?wa.name:"").localeCompare(wb?wb.name:"");
+    });
+    let rows = "";
+    workerIds.forEach(function(wid){
+      const w = byWorker[wid];
+      const worker = findWorker(wid);
+      rows += '<tr style="background:var(--surface-2);"><td colspan="4"><b>'+escapeHtml(worker?worker.name:"Unknown worker")+'</b></td></tr>';
+      Object.keys(w.tasks).sort(function(a,b){
+        const ta=findTask(a), tb=findTask(b);
+        return (ta?ta.name:"").localeCompare(tb?tb.name:"");
+      }).forEach(function(tid){
+        const t = findTask(tid);
+        const tk = w.tasks[tid];
+        const ppu = (t && t.partsPerUnit) || 1;
+        rows += '<tr><td style="padding-left:22px;color:var(--muted);">'+escapeHtml(t?t.name:"(deleted task)")+'</td>'+
+          '<td class="num">'+tk.made+'</td><td class="num">'+tk.faults+'</td>'+
+          '<td class="num">'+fmtPct(yieldPct(tk.made,tk.faults,ppu))+'</td></tr>';
+      });
+      rows += '<tr><td style="padding-left:22px;"><i>Worker total</i></td><td class="num"><b>'+w.made+'</b></td><td class="num"><b>'+w.faults+'</b></td><td class="num"><b>'+fmtPct(yieldPct(w.made,w.faults))+'</b></td></tr>';
+    });
+    return '<div class="table-wrap" style="margin-bottom:22px;"><table class="data-table"><thead><tr><th>Task</th><th class="num">Made</th><th class="num">Faults</th><th class="num">Yield</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  }
+  function managerSummaryPanel(){
+    const now = new Date();
+    const curKey = weekKeyOf(now);
+    const curStart = weekStartFor(now);
+    const yearNow = now.getFullYear();
+    const selectedYear = ui.summaryYear || yearNow;
+
+    const yearsSet = {}; yearsSet[yearNow] = true;
+    STATE.entries.forEach(function(e){ yearsSet[new Date(e.ts).getFullYear()] = true; });
+    const years = Object.keys(yearsSet).map(Number).sort(function(a,b){ return b-a; });
+    const yearTabs = years.map(function(y){
+      return '<button class="chip-btn'+(y===selectedYear?' chip-active':'')+'" onclick="App.setSummaryYear('+y+')">'+y+'</button>';
+    }).join(" ");
+
+    const weekRows = buildWorkerTaskRows(function(e){ return weekKeyOf(e.ts)===curKey; });
+    const yearRows = buildWorkerTaskRows(function(e){ return new Date(e.ts).getFullYear()===selectedYear; });
+
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Worker Summary</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div class="section-title" style="margin-top:0;">This Week · '+fmtRange(curStart)+'</div>'+
+        workerRowsTableHtml(weekRows)+
+        '<div class="section-title">Year to Date'+(selectedYear===yearNow?"":" ("+selectedYear+" archive)")+'</div>'+
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">'+yearTabs+'</div>'+
+        workerRowsTableHtml(yearRows)+
+      '</div>'
+    );
+  }
+  function enterForModal(){
+    const workers = STATE.workers.map(function(w){ return '<option value="'+w.id+'">'+escapeHtml(w.name)+(w.active?'':' (hidden)')+'</option>'; }).join("");
+    const tasks = STATE.tasks.map(function(t){ return '<option value="'+t.id+'">'+escapeHtml(t.name)+(t.active?'':' (hidden)')+'</option>'; }).join("");
+    return (
+      '<div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">'+
+        '<div class="card modal">'+
+          '<h3 style="margin-bottom:16px;">Enter Numbers for a Worker</h3>'+
+          '<div class="field"><label>Worker</label><select id="efWorker">'+workers+'</select></div>'+
+          '<div class="field"><label>Task</label><select id="efTask">'+tasks+'</select></div>'+
+          '<div class="field"><label>Made / Tested</label><input type="number" min="0" id="efMade" placeholder="0"></div>'+
+          '<div class="field"><label>Failed / Faulty</label><input type="number" min="0" id="efFaults" placeholder="0"></div>'+
+          '<div class="btn-row">'+
+            '<button class="btn btn-ghost" onclick="App.closeModal()">Cancel</button>'+
+            '<button class="btn btn-primary" onclick="App.submitEnterFor()">Save Entry</button>'+
+          '</div>'+
+        '</div>'+
+      '</div>'
+    );
+  }
+
+  /* ---------------- actions ---------------- */
+  const App = {
+    switchMode: function(m){ setDeviceMode(m); ui = { screen:null }; saveUi(); render(); },
+    goto: function(screen){ setUi({ screen:screen }); },
+    toggleRecall: function(){ setUi({ recallNotices: !ui.recallNotices }); },
+    ackItem: function(kind,id){
+      const map = { notice:"td_ackNotices", msg:"td_ackWorkerMsgs", assign:"td_ackAssignments", mgrnotice:"td_ackMgrNotices" };
+      ackAdd(map[kind], id);
+      if (kind==="notice") ui.recallNotices = false;
+      render();
+    },
+    confirmOwnerPick: function(){
+      const sel = document.getElementById("ownerSelect");
+      if (!sel || !sel.value) return;
+      setAssignedWorkerId(sel.value);
+      setUi({ screen:"pickTask" });
+    },
+    changeOwner: function(){ setAssignedWorkerId(null); setUi({ screen:"pickOwner" }); },
+    pickTask: function(){
+      const sel = document.getElementById("taskSelect");
+      if (!sel || !sel.value) return;
+      if (sel.value === "__other__") setUi({ screen:"otherJobLabel" });
+      else setUi({ screen:"enterMade", taskId:sel.value });
+    },
+    submitOtherLabel: function(){
+      const input = document.getElementById("otherJobInput");
+      const label = input ? input.value.trim() : "";
+      if (!label) return;
+      setUi({ screen:"enterMade", taskId:"__other__", otherLabel:label });
+    },
+    submitMade: function(){
+      const input = document.getElementById("madeInput");
+      const val = clamp0(input ? input.value : 0);
+      setUi({ screen:"enterFaults", made:val });
+    },
+    goScanSerials: function(){
+      const input = document.getElementById("faultsInput");
+      const faults = clamp0(Math.min(clamp0(input ? input.value : 0), ui.made));
+      setUi({ screen:"scanSerials", faults:faults, serialsList: [], serialError:null });
+    },
+    addScannedSerial: function(){
+      const input = document.getElementById("serialInput");
+      const raw = input ? input.value.trim() : "";
+      if (!raw) return;
+      const needed = Math.max(0, ui.made - ui.faults);
+      const list = (ui.serialsList || []).slice();
+      if (list.length >= needed) { showToast("Already have "+needed+" serial(s) for this batch."); return; }
+
+      const fmtErr = validateSerialFormat(raw);
+      if (fmtErr) { setUi({ serialError:{ value:raw, message:fmtErr } }); focusSelectSerialInput(false); return; }
+
+      const dup = STATE.serials.some(function(s){ return s.serial===raw; }) || list.indexOf(raw)>-1;
+      if (dup) { setUi({ serialError:{ value:raw, message:"Already recorded — enter a different serial." } }); focusSelectSerialInput(false); return; }
+
+      list.push(raw);
+      setUi({ serialsList:list, serialError:null });
+      focusSelectSerialInput(true);
+    },
+    removeScannedSerial: function(idx){
+      const list = (ui.serialsList || []).slice();
+      list.splice(idx,1);
+      setUi({ serialsList:list });
+    },
+    submitFaults: function(){
+      const workerId = getAssignedWorkerId();
+      const made = ui.made;
+      let faults;
+      if (ui.screen === "scanSerials") {
+        faults = ui.faults;
+      } else {
+        const input = document.getElementById("faultsInput");
+        faults = clamp0(input ? input.value : 0);
+      }
+
+      if (ui.taskId === "__other__") {
+        const label = (ui.otherLabel||"").trim();
+        const match = findTaskByNameOrAlias(label);
+        if (match) {
+          addEntry(workerId, match.id, made, faults, "worker", { successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
+          setUi({ screen:"askAnother", faults:faults, resolvedName:match.name, pendingReview:false, serialsCount:null });
+        } else {
+          STATE.pendingRequests.push({ id:uid("p"), workerId:workerId, label:label, made:made, faults:faults, ts:new Date().toISOString(), status:"pending" });
+          persist(false, "Sent to the manager for review ✅", "Not sent yet — retrying…");
+          setUi({ screen:"askAnother", faults:faults, pendingReview:true, resolvedName:null, serialsCount:null });
+        }
+      } else {
+        const serialsToSave = (ui.taskId === STATE.serialTaskId) ? (ui.serialsList||[]) : null;
+        if (serialsToSave) {
+          const needed = Math.max(0, made - faults);
+          if (serialsToSave.length !== needed) { showToast("Enter all "+needed+" serial number(s) first."); return; }
+        }
+        const entry = addEntry(workerId, ui.taskId, made, faults, "worker", { successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
+        if (serialsToSave && serialsToSave.length) {
+          const ts = new Date().toISOString();
+          serialsToSave.forEach(function(s){
+            STATE.serials.push({ id:uid("s"), serial:s, taskId:ui.taskId, workerId:workerId, entryId:entry.id, ts:ts });
+          });
+        }
+        setUi({ screen:"askAnother", faults:faults, resolvedName:null, pendingReview:false, serialsList:null, serialsCount: serialsToSave ? serialsToSave.length : null });
+      }
+    },
+    anotherJob: function(yes){
+      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null });
+      else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null });
+    },
+    submitPin: function(){
+      const input = document.getElementById("pinInput");
+      const val = input ? input.value : "";
+      const match = (STATE.managers||[]).find(function(m){ return m.pin === val; });
+      if (match) { setMgrIdentity(match.id); setUi({ pinError:false, mScreen:"dashboard" }); }
+      else setUi({ pinError:true });
+    },
+    logoutManager: function(){ setMgrIdentity(null); setUi({ mScreen:"dashboard" }); },
+    gotoManager: function(screen){ setUi({ mScreen:screen }); },
+    openModal: function(name){ setUi({ modal:name }); },
+    closeModal: function(){ setUi({ modal:null }); },
+
+    addTask: function(){
+      const input = document.getElementById("newTaskName");
+      const name = input ? input.value.trim() : "";
+      if (!name) return;
+      STATE.tasks.push({ id: slugify(name)+"-"+uid(""), name:name, active:true, aliases:[] });
+      persist(); render();
+    },
+    toggleTask: function(id){ const t = findTask(id); if (t) { t.active = !t.active; persist(); render(); } },
+    startTaskEdit: function(id){ setUi({ editingTaskId:id }); },
+    cancelTaskEdit: function(){ setUi({ editingTaskId:null }); },
+    saveTaskEdit: function(id){
+      const input = document.getElementById("editTaskName");
+      const name = input ? input.value.trim() : "";
+      if (!name) return;
+      const t = findTask(id);
+      if (t) t.name = name;
+      ui.editingTaskId = null; saveUi();
+      persist(); render();
+    },
+    reorderTask: function(ev, targetId){
+      ev.preventDefault();
+      const draggedId = ev.dataTransfer.getData("text/plain");
+      if (!draggedId || draggedId===targetId) return;
+      const list = STATE.tasks.slice();
+      const fromIdx = list.findIndex(function(t){ return t.id===draggedId; });
+      const toIdx = list.findIndex(function(t){ return t.id===targetId; });
+      if (fromIdx===-1 || toIdx===-1) return;
+      const item = list.splice(fromIdx,1)[0];
+      list.splice(toIdx,0,item);
+      STATE.tasks = list;
+      persist(); render();
+    },
+    deleteTask: function(id){
+      const t = findTask(id);
+      if (!t) return;
+      if (!confirm('Delete "'+t.name+'"? This cannot be undone.')) return;
+      STATE.tasks = STATE.tasks.filter(function(x){ return x.id!==id; });
+      setPriorityPins(getPriorityPins().map(function(pid){ return pid===id?null:pid; }));
+      persist(); render();
+    },
+    addWorker: function(){
+      const input = document.getElementById("newWorkerName");
+      const name = input ? input.value.trim() : "";
+      if (!name) return;
+      STATE.workers.push({ id: uid("w-"), name:name, active:true });
+      persist(); render();
+    },
+    toggleWorker: function(id){ const w = findWorker(id); if (w) { w.active = !w.active; persist(); render(); } },
+    savePin: function(){
+      const identity = getMgrIdentity();
+      const me = (STATE.managers||[]).find(function(m){ return m.id===identity; });
+      const input = document.getElementById("newPin");
+      const val = input ? input.value.trim() : "";
+      if (!me || !val) return;
+      me.pin = val; persist(); showToast("PIN updated.");
+    },
+    resetOtherPin: function(otherId){
+      const identity = getMgrIdentity();
+      const other = (STATE.managers||[]).find(function(m){ return m.id===otherId && m.id!==identity; });
+      if (!other) return;
+      other.pin = "1234";
+      persist(false, other.name+"’s PIN reset to 1234.");
+      render();
+    },
+    savePpu: function(taskId){
+      if (getMgrIdentity() !== "mark") return;
+      const input = document.getElementById("ppuInput-"+taskId);
+      const t = findTask(taskId);
+      const val = clamp0(input ? input.value : 0);
+      if (!t || !val) { showToast("Enter a valid number."); return; }
+      t.partsPerUnit = val;
+      STATE.managerNotices.push({ id:uid("mn"), kind:"ppu_change", text:"Mark changed "+t.name+" parts-per-unit to "+val, ts:new Date().toISOString(), by:"mark" });
+      persist(false, "Parts-per-unit saved.", "Saved locally — will sync.");
+      render();
+    },
+    saveHeadlineTask: function(){
+      const sel = document.getElementById("headlineTaskSelect");
+      if (!sel) return;
+      STATE.headlineTaskId = sel.value; persist(); showToast("Headline job updated."); render();
+    },
+    pinTask: function(taskId){
+      const slots = getPriorityPins();
+      if (slots.indexOf(taskId)>-1) return;
+      const emptyIdx = slots.indexOf(null);
+      if (emptyIdx===-1) { showToast("All 4 priority slots are full — unpin one first."); return; }
+      slots[emptyIdx] = taskId; setPriorityPins(slots); render();
+    },
+    unpinTask: function(idx){ const slots = getPriorityPins(); slots[idx] = null; setPriorityPins(slots); render(); },
+    togglePriorityCollapse: function(){ setPriorityCollapsed(!isPriorityCollapsed()); render(); },
+    toggleYieldCollapse: function(){ setYieldCollapsed(!isYieldCollapsed()); render(); },
+    toggleAddCombo: function(){ setUi({ addingCombo: !ui.addingCombo }); },
+    saveNewCombo: function(){
+      if ((STATE.combos||[]).length >= 5) { showToast("Max 5 combinations."); return; }
+      const nameInput = document.getElementById("comboName");
+      const name = nameInput ? nameInput.value.trim() : "";
+      const boxes = document.querySelectorAll(".comboTaskChk:checked");
+      const taskIds = Array.prototype.map.call(boxes, function(b){ return b.value; });
+      if (!name || !taskIds.length) { showToast("Name it and pick at least one task."); return; }
+      STATE.combos.push({ id:uid("c"), name:name, taskIds:taskIds });
+      persist(false, "Combination added.");
+      setUi({ addingCombo:false });
+    },
+    deleteCombo: function(id){
+      const c = (STATE.combos||[]).find(function(x){ return x.id===id; });
+      if (!c) return;
+      if (!confirm('Delete combination "'+c.name+'"?')) return;
+      STATE.combos = STATE.combos.filter(function(x){ return x.id!==id; });
+      persist(); render();
+    },
+    openReassignWindow: function(minutes){
+      minutes = clamp0(minutes);
+      if (!minutes) { showToast("Enter minutes."); return; }
+      STATE.reassignUntil = Date.now() + minutes*60000;
+      persist(false, "Reassignment window open for "+minutes+" minutes.");
+      setUi({ modal:null });
+    },
+    openReassignWindowCustom: function(){
+      const input = document.getElementById("reassignMinutes");
+      App.openReassignWindow(clamp0(input ? input.value : 0));
+    },
+    closeReassignWindow: function(){
+      STATE.reassignUntil = null;
+      persist(false, "Reassignment window closed.");
+      render();
+    },
+    startEntryEdit: function(id){ setUi({ editingEntryId:id, confirmDeleteEntryId:null }); },
+    cancelEntryEdit: function(){ setUi({ editingEntryId:null }); },
+    saveEntryEdit: function(id){
+      const e = STATE.entries.find(function(x){ return x.id===id; });
+      if (!e) return;
+      const madeInput = document.getElementById("editEntryMade-"+id);
+      const faultsInput = document.getElementById("editEntryFaults-"+id);
+      const made = clamp0(madeInput ? madeInput.value : e.made);
+      const task = findTask(e.taskId);
+      const ppu = (task && task.partsPerUnit) || 1;
+      const faults = clamp0(Math.min(clamp0(faultsInput ? faultsInput.value : e.faults), made*ppu));
+      e.made = made; e.faults = faults;
+      ui.editingEntryId = null; saveUi();
+      persist(false, "Entry updated.");
+      render();
+    },
+    startDeleteEntry: function(id){ setUi({ confirmDeleteEntryId:id, editingEntryId:null }); },
+    cancelDeleteEntry: function(){ setUi({ confirmDeleteEntryId:null }); },
+    deleteEntry: function(id){
+      STATE.entries = STATE.entries.filter(function(e){ return e.id!==id; });
+      persist(false, "Entry deleted.");
+      setUi({ confirmDeleteEntryId:null });
+    },
+    toggleSerialsCollapse: function(){ setSerialsCollapsed(!isSerialsCollapsed()); render(); },
+    toggleSerialsShowAll: function(){ setUi({ serialsShowAll: !ui.serialsShowAll }); },
+    addSerialManual: function(){
+      const input = document.getElementById("newSerialManual");
+      const val = input ? input.value.trim() : "";
+      if (!val) return;
+      const fmtErr = validateSerialFormat(val);
+      if (fmtErr) { showToast(fmtErr); return; }
+      if (STATE.serials.some(function(s){ return s.serial===val; })) { showToast("Already recorded — enter a different serial."); return; }
+      STATE.serials.push({ id:uid("s"), serial:val, taskId:STATE.serialTaskId, workerId:null, entryId:null, ts:new Date().toISOString() });
+      persist(false, "Serial added.", "Saved locally — will sync.");
+      render();
+    },
+    startSerialEdit: function(id){ setUi({ editingSerialId:id }); },
+    cancelSerialEdit: function(){ setUi({ editingSerialId:null }); },
+    saveSerialEdit: function(id){
+      const input = document.getElementById("editSerialInput");
+      const val = input ? input.value.trim() : "";
+      if (!val) return;
+      const fmtErr = validateSerialFormat(val);
+      if (fmtErr) { showToast(fmtErr); return; }
+      if (STATE.serials.some(function(s){ return s.id!==id && s.serial===val; })) { showToast("Already recorded — enter a different serial."); return; }
+      const s = STATE.serials.find(function(x){ return x.id===id; });
+      if (s) s.serial = val;
+      ui.editingSerialId = null; saveUi();
+      persist(); render();
+    },
+    saveSerialFormat: function(){
+      const lenInput = document.getElementById("serialLenInput");
+      const prefixInput = document.getElementById("serialPrefixInput");
+      const len = clamp0(lenInput ? lenInput.value : 9) || 9;
+      const prefixes = (prefixInput ? prefixInput.value : "").split(",").map(function(p){ return p.trim(); }).filter(Boolean);
+      STATE.serialFormat = { totalLength: len, prefixes: prefixes.length ? prefixes : ["7010","701"] };
+      persist(); showToast("Serial format updated."); render();
+    },
+    deleteSerial: function(id){
+      if (!confirm("Delete this serial number?")) return;
+      STATE.serials = STATE.serials.filter(function(s){ return s.id!==id; });
+      persist(); render();
+    },
+    copySerials: function(){
+      const curKey = weekKeyOf(new Date());
+      const list = ui.serialsShowAll ? STATE.serials.slice() : STATE.serials.filter(function(s){ return weekKeyOf(s.ts)===curKey; });
+      const text = list.map(function(s){ return s.serial; }).join("\n");
+      function done(){ showToast("Copied "+list.length+" serial number(s)."); }
+      function fail(){
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+          done();
+        } catch(e){ showToast("Could not copy — select the list and copy manually."); }
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(fail);
+      } else { fail(); }
+    },
+    dropOnSlot: function(ev, idx){
+      ev.preventDefault();
+      const taskId = ev.dataTransfer.getData("text/plain");
+      if (!taskId) return;
+      const slots = getPriorityPins().map(function(id){ return id===taskId?null:id; });
+      slots[idx] = taskId;
+      setPriorityPins(slots);
+      render();
+    },
+    postNotice: function(){
+      const input = document.getElementById("newNoticeText");
+      const text = input ? input.value.trim() : "";
+      if (!text) return;
+      STATE.notices.push({ id:uid("n"), text:text, ts:new Date().toISOString() });
+      persist(false, "Notice posted.", "Saved locally — will sync.");
+      render();
+    },
+    sendAssignment: function(){
+      const boxes = document.querySelectorAll(".asgWorker:checked");
+      const workerIds = Array.prototype.map.call(boxes, function(b){ return b.value; });
+      const taskSel = document.getElementById("asgTask");
+      const noteInput = document.getElementById("asgNote");
+      const taskId = taskSel ? taskSel.value : null;
+      const note = noteInput ? noteInput.value.trim() : "";
+      if (!workerIds.length || !taskId) { showToast("Pick at least one worker and a task."); return; }
+      STATE.assignments.push({ id:uid("a"), workerIds:workerIds, taskId:taskId, note:note, ts:new Date().toISOString() });
+      persist(false, "Priority message sent.", "Saved locally — will sync.");
+      showToast("Sent to "+workerIds.length+" worker(s).");
+    },
+    resolvePendingMatch: function(reqId, taskId){
+      const req = STATE.pendingRequests.find(function(r){ return r.id===reqId; });
+      const task = findTask(taskId);
+      if (!req || !task) return;
+      const key = req.label.trim().toLowerCase();
+      if (task.name.trim().toLowerCase()!==key && !(task.aliases||[]).some(function(a){ return a.trim().toLowerCase()===key; })) {
+        task.aliases = task.aliases || [];
+        task.aliases.push(req.label.trim());
+      }
+      req.status = "resolved";
+      STATE.workerMessages.push({ id:uid("m"), workerId:req.workerId, text:'Manager says: "'+req.label+'" is actually '+task.name, ts:new Date().toISOString() });
+      addEntry(req.workerId, task.id, req.made, req.faults, "worker", { ts:req.ts, successMsg:"Matched — worker notified.", failMsg:"Saved locally — will sync." });
+      render();
+    },
+    resolvePendingCreate: function(reqId){
+      const req = STATE.pendingRequests.find(function(r){ return r.id===reqId; });
+      if (!req) return;
+      const name = req.label.trim();
+      if (!name) return;
+      const newTask = { id: slugify(name)+"-"+uid(""), name:name, active:true, aliases:[] };
+      STATE.tasks.push(newTask);
+      req.status = "resolved";
+      STATE.notices.push({ id:uid("n"), text:"New job: "+name+" created", ts:new Date().toISOString() });
+      addEntry(req.workerId, newTask.id, req.made, req.faults, "worker", { ts:req.ts, successMsg:"New task created and announced.", failMsg:"Saved locally — will sync." });
+      render();
+    },
+    submitEnterFor: function(){
+      const w = document.getElementById("efWorker").value;
+      const t = document.getElementById("efTask").value;
+      const made = clamp0(document.getElementById("efMade").value);
+      const faults = clamp0(document.getElementById("efFaults").value);
+      if (!w || !t) return;
+      addEntry(w, t, made, faults, "manager", { successMsg:"Entry saved." });
+      setUi({ modal:null });
+      showToast("Entry saved for "+((findWorker(w)||{}).name||"worker")+".");
+    },
+    setSummaryYear: function(y){ setUi({ summaryYear:y }); },
+    saveStandupSchedule: function(){
+      const enabledEl = document.getElementById("standupEnabled");
+      const hourEl = document.getElementById("standupHour");
+      const minuteEl = document.getElementById("standupMinute");
+      const enabled = enabledEl ? !!enabledEl.checked : true;
+      let hour = clamp0(hourEl ? hourEl.value : 11);
+      let minute = clamp0(minuteEl ? minuteEl.value : 0);
+      if (hour > 23) hour = 23;
+      if (minute > 59) minute = 59;
+      const days = [];
+      for (let d=0; d<7; d++){
+        const cb = document.getElementById("standupDay"+d);
+        if (cb && cb.checked) days.push(d);
+      }
+      STATE.standup = { enabled:enabled, days:days, hour:hour, minute:minute };
+      persist(false, "Stand-up schedule updated.", "Saved locally — will sync.");
+      render();
+    },
+    ackStandup: function(){
+      if (standupOverlayState) setStandupAckedAt(standupOverlayState.occTs);
+      standupOverlayState = null;
+      render();
+    },
+    downloadWeeklySummary: function(){
+      const now = new Date();
+      const curStart = weekStartFor(now);
+      const curKey = weekKeyOf(now);
+      const agg = aggregateWeek(curKey);
+      const rows = [];
+      rows.push(["Shift Floor Weekly Summary"]);
+      rows.push(["Week", fmtRange(curStart)]);
+      rows.push([]);
+      rows.push(["Task Summary"]);
+      rows.push(["Task","Made","Faults","Yield %","Fault Rate %"]);
+      activeTasks().forEach(function(t){
+        const a = agg[t.id];
+        const made = a?a.made:0, faults = a?a.faults:0;
+        const ppu = t.partsPerUnit || 1;
+        rows.push([t.name, made, faults, fmtPct(yieldPct(made,faults,ppu)), fmtPct(faultPct(made,faults,ppu))]);
+      });
+      rows.push([]);
+      rows.push(["Worker Summary"]);
+      rows.push(["Worker","Task","Made","Faults","Yield %"]);
+      const byWorker = buildWorkerTaskRows(function(e){ return weekKeyOf(e.ts)===curKey; });
+      Object.keys(byWorker).forEach(function(wid){
+        const w = byWorker[wid];
+        const worker = findWorker(wid);
+        Object.keys(w.tasks).forEach(function(tid){
+          const t = findTask(tid);
+          const tk = w.tasks[tid];
+          const ppu = (t && t.partsPerUnit) || 1;
+          rows.push([worker?worker.name:"Unknown", t?t.name:"(deleted)", tk.made, tk.faults, fmtPct(yieldPct(tk.made,tk.faults,ppu))]);
+        });
+        rows.push([(worker?worker.name:"Unknown")+" total", "", w.made, w.faults, fmtPct(yieldPct(w.made,w.faults))]);
+      });
+      const csv = rows.map(function(r){
+        return r.map(function(cell){
+          const s = String(cell==null?"":cell);
+          return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+        }).join(",");
+      }).join("\r\n");
+      const csvWithBom = "﻿" + csv;
+      const filename = "shift-floor-weekly-"+curKey+".csv";
+      downloadCsv(filename, csvWithBom);
+      showToast("Weekly summary downloaded.");
+    },
+    downloadMonthlySummary: function(){
+      const now = new Date();
+      const mStart = monthStartFor(now);
+      const mEnd = monthEndFor(now);
+      const monthKey = monthKeyOf(now);
+      const isPartial = now < mEnd;
+      const agg = aggregateMonth(monthKey);
+      const rows = [];
+      rows.push(["Shift Floor Monthly Summary"]);
+      rows.push(["Month", fmtMonthLabel(mStart)]);
+      if (isPartial) rows.push(["Note", "Partial month data through "+now.getFullYear()+"-"+pad2(now.getMonth()+1)+"-"+pad2(now.getDate())]);
+      rows.push([]);
+      rows.push(["Task Summary"]);
+      rows.push(["Task","Made","Faults","Yield %","Fault Rate %"]);
+      activeTasks().forEach(function(t){
+        const a = agg[t.id];
+        const made = a?a.made:0, faults = a?a.faults:0;
+        const ppu = t.partsPerUnit || 1;
+        rows.push([t.name, made, faults, fmtPct(yieldPct(made,faults,ppu)), fmtPct(faultPct(made,faults,ppu))]);
+      });
+      rows.push([]);
+      rows.push(["Worker Summary"]);
+      rows.push(["Worker","Task","Made","Faults","Yield %"]);
+      const byWorker = buildWorkerTaskRows(function(e){ return monthKeyOf(e.ts)===monthKey; });
+      Object.keys(byWorker).forEach(function(wid){
+        const w = byWorker[wid];
+        const worker = findWorker(wid);
+        Object.keys(w.tasks).forEach(function(tid){
+          const t = findTask(tid);
+          const tk = w.tasks[tid];
+          const ppu = (t && t.partsPerUnit) || 1;
+          rows.push([worker?worker.name:"Unknown", t?t.name:"(deleted)", tk.made, tk.faults, fmtPct(yieldPct(tk.made,tk.faults,ppu))]);
+        });
+        rows.push([(worker?worker.name:"Unknown")+" total", "", w.made, w.faults, fmtPct(yieldPct(w.made,w.faults))]);
+      });
+      const csv = rows.map(function(r){
+        return r.map(function(cell){
+          const s = String(cell==null?"":cell);
+          return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+        }).join(",");
+      }).join("\r\n");
+      const csvWithBom = "﻿" + csv;
+      const filename = "shift-floor-monthly-"+monthKey+(isPartial?"-partial":"")+".csv";
+      downloadCsv(filename, csvWithBom);
+      showToast("Monthly summary downloaded.");
+    }
+  };
+
+  function downloadCsv(filename, csvWithBom){
+    try {
+      const blob = new Blob([csvWithBom], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+    } catch(e){
+      console.error("Shift Floor: CSV download failed", e);
+    }
+  }
+  window.App = App;
+
+  init();
+})();
+</script>
+</body>
+</html>

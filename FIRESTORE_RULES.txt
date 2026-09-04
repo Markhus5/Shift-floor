@@ -1,0 +1,18 @@
+Shift Floor uses no Firebase Auth — the app is PIN-gated at the app level only, not
+at the database level. The rules below allow anyone who has this Firebase project's
+web config (the values in firebase-config.js) to read and write the app's single
+shared document. That's an acceptable tradeoff for an internal shop-floor tool that
+isn't reachable except by tablets on site, but be aware it is not further
+access-controlled at the database level — treat the config values as "shared secret
+enough to keep off public pages," not as a real credential.
+
+Paste this into Firebase Console → Firestore Database → Rules:
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /shiftfloor/{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
