@@ -135,6 +135,12 @@
   }
   .kiosk-title{font-size:26px; line-height:1.2; margin-bottom:8px;}
   .kiosk-sub{color:var(--muted); font-size:15px; margin-bottom:24px; line-height:1.45;}
+  .connect-spinner{
+    width:34px; height:34px; margin:6px auto 22px; border-radius:50%;
+    border:3px solid var(--line); border-top-color:var(--accent);
+    animation: connectSpin .8s linear infinite;
+  }
+  @keyframes connectSpin{ to{ transform:rotate(360deg); } }
   .kiosk-body{display:flex; flex-direction:column; gap:14px;}
   select.big, input.big{
     width:100%; font-size:19px; padding:16px 14px; border-radius:12px; border:1.5px solid var(--line);
@@ -305,7 +311,7 @@
   // ---- Firebase bridge: exposes window.ShiftFloorDB {subscribe(cb), save(stateObj)} ----
   // and window.ShiftFloorDBReady (a Promise) which the main app script awaits before init().
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-  import { getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+  import { initializeFirestore, persistentLocalCache, getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
   window.ShiftFloorDBReady = new Promise(function(resolve){
     try {
@@ -317,7 +323,17 @@
         return;
       }
       const app = initializeApp(cfg);
-      const db = getFirestore(app);
+      let db;
+      try {
+        // Enable offline persistent local cache so a tablet that briefly loses
+        // connectivity (or gets reloaded after being backgrounded) can still read
+        // the true last-known state instantly from IndexedDB instead of starting
+        // from a blank default — see stateConfirmed handling in the main script.
+        db = initializeFirestore(app, { localCache: persistentLocalCache() });
+      } catch(e){
+        console.warn("Shift Floor: persistent local cache unavailable, falling back to in-memory Firestore.", e);
+        db = getFirestore(app);
+      }
       const stateRef = doc(db, "shiftfloor", "state");
 
       window.ShiftFloorDB = {
@@ -369,12 +385,33 @@
     });
   }
   function clamp0(n){ n = Math.floor(Number(n)); return isNaN(n) || n < 0 ? 0 : n; }
+  // Like clamp0 but keeps a negative value — used for worker self-service
+  // correction entries (Fix 2), where "-1" means "subtract one from the running total".
+  function toSignedInt(n){ n = Math.trunc(Number(n)); return isNaN(n) ? 0 : n; }
   function pad2(n){ return n < 10 ? "0"+n : ""+n; }
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const DOWS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
-  function weekStartFor(d){
+  // Date-only ("YYYY-MM-DD") helpers used for entryDate (the day an entry is attributed
+  // to) as distinct from ts (the moment it was actually submitted) — see Fix 3.
+  function dateOnlyStr(d){
     const x = new Date(d);
+    return x.getFullYear()+"-"+pad2(x.getMonth()+1)+"-"+pad2(x.getDate());
+  }
+  function todayDateOnly(){ return dateOnlyStr(new Date()); }
+  // Parses either a date-only string ("YYYY-MM-DD", interpreted as a LOCAL calendar day
+  // so it can't shift to the adjacent day under `new Date(str)`'s UTC parsing) or any
+  // other date-ish value (ISO timestamp, Date, etc.) via the normal Date constructor.
+  function parseDateBasis(d){
+    if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      const parts = d.split("-");
+      return new Date(Number(parts[0]), Number(parts[1])-1, Number(parts[2]));
+    }
+    return new Date(d);
+  }
+
+  function weekStartFor(d){
+    const x = parseDateBasis(d);
     x.setHours(0,0,0,0);
     const day = x.getDay();
     const diff = (day - 6 + 7) % 7;
@@ -410,9 +447,9 @@
     return d + (d===1?" day ago":" days ago");
   }
   function fmtPct(n){ return n==null ? "—" : n.toFixed(1)+"%"; }
-  function monthKeyOf(d){ const x = new Date(d); return x.getFullYear()+"-"+pad2(x.getMonth()+1); }
-  function monthStartFor(d){ const x = new Date(d); return new Date(x.getFullYear(), x.getMonth(), 1); }
-  function monthEndFor(d){ const x = new Date(d); return new Date(x.getFullYear(), x.getMonth()+1, 0, 23,59,59,999); }
+  function monthKeyOf(d){ const x = parseDateBasis(d); return x.getFullYear()+"-"+pad2(x.getMonth()+1); }
+  function monthStartFor(d){ const x = parseDateBasis(d); return new Date(x.getFullYear(), x.getMonth(), 1); }
+  function monthEndFor(d){ const x = parseDateBasis(d); return new Date(x.getFullYear(), x.getMonth()+1, 0, 23,59,59,999); }
   function fmtMonthLabel(d){ return MONTHS[d.getMonth()]+" "+d.getFullYear(); }
 
   /* ---------------- default seed data ---------------- */
@@ -497,6 +534,13 @@
   let STATE = null;
   let dbApi = null;
   let saveStatus = "idle";
+  // Becomes true only once we truly know the real state — either Firestore confirmed
+  // real data, or Firestore confirmed the document genuinely doesn't exist yet (brand
+  // new setup). Until then, render() must show a "connecting" screen, never the
+  // default/blank dashboard, so a stray persist() can never overwrite real data with
+  // defaults. See init()/render() below.
+  let stateConfirmed = false;
+  let connectFailed = false;
   let ui = { screen: null };
   let toastMsg = null, toastTimer = null;
   let standupOverlayState = null; // { phase:'countdown'|'blinking'|'holding', occTs:Number, secondsLeft:Number }
@@ -569,6 +613,12 @@
     });
     if (!STATE.workers) { STATE.workers = []; changed = true; }
     if (!STATE.entries) { STATE.entries = []; changed = true; }
+    STATE.entries.forEach(function(e){
+      // Fix 3 (backdating): every entry needs a date-only entryDate it's attributed to,
+      // separate from ts (the real submission moment). Backfill it from ts for any
+      // entry created before this feature existed.
+      if (!e.entryDate) { e.entryDate = dateOnlyStr(e.ts || Date.now()); changed = true; }
+    });
     if (!STATE.pendingRequests) { STATE.pendingRequests = []; changed = true; }
     if (!STATE.workerMessages) { STATE.workerMessages = []; changed = true; }
     if (!STATE.notices) { STATE.notices = []; changed = true; }
@@ -810,7 +860,11 @@
     } catch(e){ dbApi = null; }
 
     if (!dbApi) {
+      // We have no way to know whether real data exists in Firestore, so we must
+      // NOT assume it's safe to show/seed the blank default state. Stay unconfirmed
+      // and show the "can't connect" screen instead of the normal UI.
       saveStatus = "offline";
+      connectFailed = true;
       render();
       return;
     }
@@ -821,12 +875,15 @@
         if (remoteState) {
           STATE = remoteState;
           const changed = migrateState();
+          stateConfirmed = true;
           saveStatus = "saved";
           render();
           if (changed) persist(true);
         } else {
-          // First run: no document yet — seed it with our default state.
+          // First run: Firestore confirmed the document truly doesn't exist yet —
+          // legitimate brand-new setup. Safe to seed defaults.
           const changed = migrateState();
+          stateConfirmed = true;
           persist(true);
         }
         return;
@@ -849,6 +906,12 @@
     retryTimer = setTimeout(function(){ persist(true); }, 6000*retryCount);
   }
   function persist(silent, successMsg, failMsg){
+    if (!stateConfirmed) {
+      // Safety net: never let a stray save path write default/unconfirmed state
+      // over whatever is really in Firestore before we've confirmed what that is.
+      console.warn("Shift Floor: persist() called before state was confirmed — ignoring.");
+      return;
+    }
     if (!dbApi) {
       saveStatus = "offline";
       if (failMsg) showToast(failMsg);
@@ -908,7 +971,7 @@
   function aggregateWeek(weekKey){
     const byTask = {};
     STATE.entries.forEach(function(e){
-      if (weekKeyOf(e.ts) !== weekKey) return;
+      if (weekKeyOf(e.entryDate) !== weekKey) return;
       const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null });
       agg.made += e.made;
       agg.faults += e.faults;
@@ -920,7 +983,7 @@
   function aggregateMonth(monthKey){
     const byTask = {};
     STATE.entries.forEach(function(e){
-      if (monthKeyOf(e.ts) !== monthKey) return;
+      if (monthKeyOf(e.entryDate) !== monthKey) return;
       const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null });
       agg.made += e.made;
       agg.faults += e.faults;
@@ -960,11 +1023,23 @@
     STATE.entries.filter(filterFn).forEach(function(e){
       const task = findTask(e.taskId);
       const ppu = (task && task.partsPerUnit) || 1;
-      const capacity = e.made*ppu;
       const w = byWorker[e.workerId] || (byWorker[e.workerId] = { workerId:e.workerId, tasks:{}, made:0, faults:0, capacity:0 });
-      const tk = w.tasks[e.taskId] || (w.tasks[e.taskId] = { made:0, faults:0, capacity:0 });
-      tk.made += e.made; tk.faults += e.faults; tk.capacity += capacity;
-      w.made += e.made; w.faults += e.faults; w.capacity += capacity;
+      const tk = w.tasks[e.taskId] || (w.tasks[e.taskId] = { made:0, faults:0, capacity:0, ppu:ppu });
+      tk.made += e.made; tk.faults += e.faults;
+    });
+    // Negative correction entries (Fix 2) are summed in as-is above; clamp the AGGREGATE
+    // running total at zero here (never the individual entry) so a correction can't drive
+    // a displayed total, capacity, or yield below zero.
+    Object.keys(byWorker).forEach(function(workerId){
+      const w = byWorker[workerId];
+      Object.keys(w.tasks).forEach(function(taskId){
+        const tk = w.tasks[taskId];
+        tk.made = Math.max(0, tk.made);
+        tk.faults = Math.max(0, tk.faults);
+        tk.capacity = tk.made * tk.ppu;
+        delete tk.ppu;
+        w.made += tk.made; w.faults += tk.faults; w.capacity += tk.capacity;
+      });
     });
     return byWorker;
   }
@@ -973,15 +1048,27 @@
     opts = opts || {};
     const task = findTask(taskId);
     const ppu = (task && task.partsPerUnit) || 1;
-    const madeClamped = clamp0(made);
-    const maxPossible = madeClamped*ppu;
+    const madeNum = toSignedInt(made);
+    let faultsNum = toSignedInt(faults);
+    // The made*ppu cap on faults only makes sense for a normal (non-negative) entry.
+    // A negative correction entry (Fix 2 — worker self-service correction) is stored
+    // exactly as typed, uncapped, so it becomes its own auditable row and nets out of
+    // the running total cleanly. Any resulting negative running total is clamped to
+    // zero where totals are aggregated for display (buildWorkerTaskRows), not here.
+    if (madeNum >= 0 && faultsNum >= 0) {
+      faultsNum = Math.min(faultsNum, madeNum*ppu);
+    }
+    const ts = opts.ts || new Date().toISOString();
     const entry = {
       id: uid("e"),
       workerId: workerId,
       taskId: taskId,
-      made: madeClamped,
-      faults: clamp0(Math.min(faults, maxPossible)),
-      ts: opts.ts || new Date().toISOString(),
+      made: madeNum,
+      faults: faultsNum,
+      ts: ts,
+      // The day this entry is attributed to for weekly/monthly/YTD bucketing (Fix 3) —
+      // distinct from ts, which stays the real submission moment for audit/ordering.
+      entryDate: opts.entryDate || dateOnlyStr(ts),
       by: by
     };
     STATE.entries.push(entry);
@@ -990,8 +1077,32 @@
   }
 
   /* ---------------- rendering: shell ---------------- */
+  function renderConnectingScreen(){
+    if (connectFailed) {
+      return (
+        '<div class="kiosk"><div class="card kiosk-card">'+
+          '<div class="kiosk-eyebrow">Shift Floor</div>'+
+          '<h1 class="kiosk-title">Can’t connect to Shift Floor</h1>'+
+          '<div class="kiosk-sub">Check the network connection and reopen the app. To protect production data, nothing will be shown or saved until we can confirm the real state.</div>'+
+        '</div></div>'
+      );
+    }
+    return (
+      '<div class="kiosk"><div class="card kiosk-card">'+
+        '<div class="kiosk-eyebrow">Shift Floor</div>'+
+        '<h1 class="kiosk-title">Connecting to Shift Floor…</h1>'+
+        '<div class="connect-spinner"></div>'+
+        '<div class="kiosk-sub">Waiting to sync with the shared record before showing any numbers.</div>'+
+      '</div></div>'
+    );
+  }
+
   function render(){
     const app = document.getElementById("app");
+    if (!stateConfirmed) {
+      document.getElementById("app").innerHTML = renderConnectingScreen();
+      return;
+    }
     const mode = getDeviceMode();
     let html = "";
     if (!mode) {
@@ -1186,10 +1297,35 @@
       '<div class="kiosk-title">What job did you do?</div>'+
       '<div class="kiosk-sub">Type it in — the manager will match it to a job.</div>'+
       '<div class="kiosk-body">'+
-        '<input class="big" type="text" id="otherJobInput" placeholder="e.g. touch-up on power board" autofocus>'+
+        '<input class="big" type="text" id="otherJobInput" placeholder="e.g. touch-up on power board" autofocus onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.submitOtherLabel();}">'+
         '<button class="btn btn-primary" onclick="App.submitOtherLabel()">Next</button>'+
         '<button class="link-btn" onclick="App.goto(\'pickTask\')">Back</button>'+
       '</div>'
+    );
+  }
+  // Fix 3 (late-entry backdating): a small confirmation line shown on the made/faults
+  // entry screens ("Logging <task> for <date>"), plus a toggle that reveals a bounded
+  // date picker for a late entry. The chosen date is read back by submitFaults() as
+  // ui.entryDate and stored on the entry as entryDate (see addEntry).
+  function entryDateBlock(){
+    const chosen = ui.entryDate || todayDateOnly();
+    const chosenD = parseDateBasis(chosen);
+    const label = fmtDateShort(chosenD)+" "+chosenD.getFullYear();
+    if (!ui.entryDateEditing) {
+      return (
+        '<div class="kiosk-sub" style="margin-bottom:2px;">Logging <b>'+escapeHtml(taskLabelForUi())+'</b> for <b>'+label+'</b></div>'+
+        '<button type="button" class="link-btn" style="margin-top:0;" onclick="App.toggleEntryDateEdit(true)">This is a late entry — use a different date</button>'
+      );
+    }
+    const minStr = dateOnlyStr((function(){ const d = new Date(); d.setDate(d.getDate()-60); return d; })());
+    const maxStr = todayDateOnly();
+    return (
+      '<div class="kiosk-sub" style="margin-bottom:2px;">Logging <b>'+escapeHtml(taskLabelForUi())+'</b> for <b>'+label+'</b></div>'+
+      '<div class="field" style="text-align:left;">'+
+        '<label>Entry date (up to 60 days back, not in the future)</label>'+
+        '<input type="date" id="entryDateInput" value="'+chosen+'" min="'+minStr+'" max="'+maxStr+'" onchange="App.setEntryDate(this.value)" style="padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px;">'+
+      '</div>'+
+      '<button type="button" class="link-btn" style="margin-top:0;" onclick="App.toggleEntryDateEdit(false)">Use today’s date instead</button>'
     );
   }
   function enterMadeBody(){
@@ -1197,8 +1333,10 @@
       '<div class="task-name-tag">'+escapeHtml(taskLabelForUi())+'</div>'+
       '<div class="kiosk-title" style="margin-top:12px;">How many tested or made?</div>'+
       '<div class="kiosk-sub">Enter the total quantity for this update.</div>'+
+      entryDateBlock()+
       '<div class="kiosk-body">'+
-        '<input class="big" type="number" inputmode="numeric" min="0" id="madeInput" data-autofocus="1" placeholder="0">'+
+        '<input class="big" type="number" min="-9999" id="madeInput" data-autofocus="1" placeholder="0" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.submitMade();}">'+
+        '<div class="kiosk-sub" style="font-size:12.5px;margin-top:-8px;">Enter a negative number (e.g. -1) to correct a mistake from earlier this week.</div>'+
         '<button class="btn btn-primary" onclick="App.submitMade()">Next</button>'+
         '<button class="link-btn" onclick="App.goto(\'pickTask\')">Back</button>'+
       '</div>'
@@ -1226,8 +1364,10 @@
       '<div class="task-name-tag">'+escapeHtml(taskLabelForUi())+'</div>'+
       '<div class="kiosk-title" style="margin-top:12px;">'+question+'</div>'+
       '<div class="kiosk-sub">'+subLabel+'</div>'+
+      entryDateBlock()+
       '<div class="kiosk-body">'+
-        '<input class="big" type="number" inputmode="numeric" min="0" id="faultsInput" data-autofocus="1" placeholder="0">'+
+        '<input class="big" type="number" min="-9999" id="faultsInput" data-autofocus="1" placeholder="0" onkeydown="if(event.key===\'Enter\'){event.preventDefault();'+btnAction+';}">'+
+        (isSerialTask ? "" : '<div class="kiosk-sub" style="font-size:12.5px;margin-top:-8px;">Enter a negative number (e.g. -1) to correct a mistake from earlier this week.</div>')+
         '<button class="btn btn-primary" onclick="'+btnAction+'">'+btnLabel+'</button>'+
         '<button class="link-btn" onclick="App.goto(\'enterMade\')">Back</button>'+
       '</div>'
@@ -1520,7 +1660,7 @@
           '<button class="chip-btn" onclick="App.cancelDeleteEntry()">Cancel</button></div></div>';
       }
       return '<div class="list-row"><div><div><b>'+escapeHtml(workerName)+'</b> — '+escapeHtml(taskName)+'</div>'+
-        '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · '+fmtRelTime(e.ts)+'</div></div>'+
+        '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · for '+escapeHtml(e.entryDate||"—")+' · logged '+fmtRelTime(e.ts)+'</div></div>'+
         '<div class="actions"><button class="chip-btn" onclick="App.startEntryEdit(\''+e.id+'\')">Edit</button>'+
         '<button class="chip-btn danger" onclick="App.startDeleteEntry(\''+e.id+'\')">Delete</button></div></div>';
     }).join("");
@@ -1847,14 +1987,14 @@
     const selectedYear = ui.summaryYear || yearNow;
 
     const yearsSet = {}; yearsSet[yearNow] = true;
-    STATE.entries.forEach(function(e){ yearsSet[new Date(e.ts).getFullYear()] = true; });
+    STATE.entries.forEach(function(e){ yearsSet[parseDateBasis(e.entryDate).getFullYear()] = true; });
     const years = Object.keys(yearsSet).map(Number).sort(function(a,b){ return b-a; });
     const yearTabs = years.map(function(y){
       return '<button class="chip-btn'+(y===selectedYear?' chip-active':'')+'" onclick="App.setSummaryYear('+y+')">'+y+'</button>';
     }).join(" ");
 
-    const weekRows = buildWorkerTaskRows(function(e){ return weekKeyOf(e.ts)===curKey; });
-    const yearRows = buildWorkerTaskRows(function(e){ return new Date(e.ts).getFullYear()===selectedYear; });
+    const weekRows = buildWorkerTaskRows(function(e){ return weekKeyOf(e.entryDate)===curKey; });
+    const yearRows = buildWorkerTaskRows(function(e){ return parseDateBasis(e.entryDate).getFullYear()===selectedYear; });
 
     return (
       '<div class="card panel">'+
@@ -1919,7 +2059,7 @@
     },
     submitMade: function(){
       const input = document.getElementById("madeInput");
-      const val = clamp0(input ? input.value : 0);
+      const val = toSignedInt(input ? input.value : 0);
       setUi({ screen:"enterFaults", made:val });
     },
     goScanSerials: function(){
@@ -1958,17 +2098,18 @@
         faults = ui.faults;
       } else {
         const input = document.getElementById("faultsInput");
-        faults = clamp0(input ? input.value : 0);
+        faults = toSignedInt(input ? input.value : 0);
       }
+      const entryDate = ui.entryDate || todayDateOnly();
 
       if (ui.taskId === "__other__") {
         const label = (ui.otherLabel||"").trim();
         const match = findTaskByNameOrAlias(label);
         if (match) {
-          addEntry(workerId, match.id, made, faults, "worker", { successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
+          addEntry(workerId, match.id, made, faults, "worker", { entryDate:entryDate, successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
           setUi({ screen:"askAnother", faults:faults, resolvedName:match.name, pendingReview:false, serialsCount:null });
         } else {
-          STATE.pendingRequests.push({ id:uid("p"), workerId:workerId, label:label, made:made, faults:faults, ts:new Date().toISOString(), status:"pending" });
+          STATE.pendingRequests.push({ id:uid("p"), workerId:workerId, label:label, made:made, faults:faults, ts:new Date().toISOString(), entryDate:entryDate, status:"pending" });
           persist(false, "Sent to the manager for review ✅", "Not sent yet — retrying…");
           setUi({ screen:"askAnother", faults:faults, pendingReview:true, resolvedName:null, serialsCount:null });
         }
@@ -1978,7 +2119,7 @@
           const needed = Math.max(0, made - faults);
           if (serialsToSave.length !== needed) { showToast("Enter all "+needed+" serial number(s) first."); return; }
         }
-        const entry = addEntry(workerId, ui.taskId, made, faults, "worker", { successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
+        const entry = addEntry(workerId, ui.taskId, made, faults, "worker", { entryDate:entryDate, successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
         if (serialsToSave && serialsToSave.length) {
           const ts = new Date().toISOString();
           serialsToSave.forEach(function(s){
@@ -1988,9 +2129,18 @@
         setUi({ screen:"askAnother", faults:faults, resolvedName:null, pendingReview:false, serialsList:null, serialsCount: serialsToSave ? serialsToSave.length : null });
       }
     },
+    setEntryDate: function(val){
+      if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return;
+      const minD = new Date(); minD.setHours(0,0,0,0); minD.setDate(minD.getDate()-60);
+      const maxD = new Date(); maxD.setHours(0,0,0,0);
+      const picked = parseDateBasis(val);
+      if (picked < minD || picked > maxD) { showToast("Pick a date within the last 60 days, not in the future."); return; }
+      setUi({ entryDate: val });
+    },
+    toggleEntryDateEdit: function(on){ setUi({ entryDateEditing: !!on, entryDate: on ? (ui.entryDate || todayDateOnly()) : null }); },
     anotherJob: function(yes){
-      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null });
-      else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null });
+      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false });
+      else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false });
     },
     submitPin: function(){
       const input = document.getElementById("pinInput");
@@ -2251,7 +2401,7 @@
       }
       req.status = "resolved";
       STATE.workerMessages.push({ id:uid("m"), workerId:req.workerId, text:'Manager says: "'+req.label+'" is actually '+task.name, ts:new Date().toISOString() });
-      addEntry(req.workerId, task.id, req.made, req.faults, "worker", { ts:req.ts, successMsg:"Matched — worker notified.", failMsg:"Saved locally — will sync." });
+      addEntry(req.workerId, task.id, req.made, req.faults, "worker", { ts:req.ts, entryDate:req.entryDate, successMsg:"Matched — worker notified.", failMsg:"Saved locally — will sync." });
       render();
     },
     resolvePendingCreate: function(reqId){
@@ -2263,7 +2413,7 @@
       STATE.tasks.push(newTask);
       req.status = "resolved";
       STATE.notices.push({ id:uid("n"), text:"New job: "+name+" created", ts:new Date().toISOString() });
-      addEntry(req.workerId, newTask.id, req.made, req.faults, "worker", { ts:req.ts, successMsg:"New task created and announced.", failMsg:"Saved locally — will sync." });
+      addEntry(req.workerId, newTask.id, req.made, req.faults, "worker", { ts:req.ts, entryDate:req.entryDate, successMsg:"New task created and announced.", failMsg:"Saved locally — will sync." });
       render();
     },
     submitEnterFor: function(){
@@ -2320,7 +2470,7 @@
       rows.push([]);
       rows.push(["Worker Summary"]);
       rows.push(["Worker","Task","Made","Faults","Yield %"]);
-      const byWorker = buildWorkerTaskRows(function(e){ return weekKeyOf(e.ts)===curKey; });
+      const byWorker = buildWorkerTaskRows(function(e){ return weekKeyOf(e.entryDate)===curKey; });
       Object.keys(byWorker).forEach(function(wid){
         const w = byWorker[wid];
         const worker = findWorker(wid);
@@ -2366,7 +2516,7 @@
       rows.push([]);
       rows.push(["Worker Summary"]);
       rows.push(["Worker","Task","Made","Faults","Yield %"]);
-      const byWorker = buildWorkerTaskRows(function(e){ return monthKeyOf(e.ts)===monthKey; });
+      const byWorker = buildWorkerTaskRows(function(e){ return monthKeyOf(e.entryDate)===monthKey; });
       Object.keys(byWorker).forEach(function(wid){
         const w = byWorker[wid];
         const worker = findWorker(wid);
