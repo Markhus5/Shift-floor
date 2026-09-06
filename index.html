@@ -481,6 +481,14 @@
   ];
   const SMT_SEED_TAG = "v3-smt-top-1";
   const DEFAULT_SERIAL_FORMAT = { totalLength:9, prefixes:["7010","701"] };
+  // Retargets serial scanning from "7000AI PROVISIONING" to "7000AI Final Assy" — a task
+  // that already exists in live Firestore data (created earlier via the "other job" alias
+  // flow) but isn't in this file's DEFAULT_TASK_NAMES seed list. See migrateState(): this
+  // tag is only set once the task is actually found by name, so a client that migrates
+  // before that task has synced down keeps retrying on every subsequent load instead of
+  // silently giving up.
+  const FINAL_ASSY_TASK_NAME = "7000AI Final Assy";
+  const FINAL_ASSY_SEED_TAG = "v1-final-assy-serialtask-1";
   const TOUCHUP_PARTS = {
     "7000-03+01 main board touch-up": 20,
     "7010-03+01 power board touch-up": 13,
@@ -519,6 +527,7 @@
       serialTaskId: null,
       serials: [],
       serialFormat: Object.assign({}, DEFAULT_SERIAL_FORMAT),
+      finalAssySeedTag: null,
       reassignUntil: null,
       seedTag: null,
       workerSeedTag: null,
@@ -685,6 +694,27 @@
     if (!STATE.serialTaskId || !findTask(STATE.serialTaskId)) {
       const serialTask = STATE.tasks.find(function(t){ return t.name.trim().toLowerCase() === "7000ai provisioning"; });
       if (serialTask) { STATE.serialTaskId = serialTask.id; changed = true; }
+    }
+    // Feature 4 (weekly pending-serials tracking): every serial row needs a date-only
+    // entryDate it's attributed to, same idea as entries' entryDate. Backfill any row
+    // created before this feature existed from its ts.
+    STATE.serials.forEach(function(s){
+      if (!s.entryDate) { s.entryDate = dateOnlyStr(s.ts || Date.now()); changed = true; }
+    });
+    // Feature 1: retarget serial scanning at "7000AI Final Assy" once it's found by name.
+    // This task lives only in live Firestore data (not this file's default seed list), so
+    // it may not have synced down yet on a given client/load. Only mark this tag done once
+    // the lookup actually succeeds — if not found yet, leave serialTaskId as-is (still
+    // whatever the block above resolved it to) and let the next migrateState() call (next
+    // reload, or next Firestore snapshot) retry, without re-running any other already-
+    // completed seed-tag block above.
+    if (STATE.finalAssySeedTag !== FINAL_ASSY_SEED_TAG) {
+      const finalAssyTask = findTaskByNameOrAlias(FINAL_ASSY_TASK_NAME);
+      if (finalAssyTask) {
+        STATE.serialTaskId = finalAssyTask.id;
+        STATE.finalAssySeedTag = FINAL_ASSY_SEED_TAG;
+        changed = true;
+      }
     }
     if (!STATE.serialFormat || !STATE.serialFormat.totalLength || !STATE.serialFormat.prefixes) {
       STATE.serialFormat = Object.assign({}, DEFAULT_SERIAL_FORMAT);
@@ -959,6 +989,111 @@
       else el.select();
     }, 0);
   }
+  /* ---------------- Feature 2: camera barcode scanning ---------------- */
+  // Dependency-free: uses the browser's native BarcodeDetector API only (feature-detected
+  // below), no bundled/polyfill library. Lives entirely outside the render()/innerHTML
+  // cycle — its modal is appended straight to document.body and updated with direct DOM
+  // writes — so the live <video> element is never torn down by a normal app re-render
+  // while a scan session is open. Strictly additive: every detected barcode is fed through
+  // the SAME manual-entry function (App.addScannedSerial or App.addSerialManual) that a
+  // typed serial would use, so validation/dedup/format-checking is never duplicated, and
+  // if the camera can't be used at all the manual type/paste path is completely unaffected.
+  let cameraScan = null; // { stream, rafId, lastCode, lastCodeAt, opts, modalEl }
+  function closeCameraScan(){
+    if (!cameraScan) return;
+    const cs = cameraScan;
+    cameraScan = null; // clear first so any in-flight detect()/getUserMedia callback bails out
+    if (cs.rafId) cancelAnimationFrame(cs.rafId);
+    if (cs.stream) { try { cs.stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){} }
+    if (cs.modalEl && cs.modalEl.parentNode) cs.modalEl.parentNode.removeChild(cs.modalEl);
+  }
+  function handleCameraCode(code){
+    if (!cameraScan) return;
+    const opts = cameraScan.opts;
+    const prevCount = opts.getCount ? opts.getCount() : 0;
+    opts.feed(code);
+    const modal = cameraScan.modalEl;
+    if (!modal) return;
+    const newCount = opts.getCount ? opts.getCount() : prevCount;
+    const countEl = modal.querySelector("#camScanCount");
+    if (countEl) countEl.textContent = "Scanned "+newCount+(opts.targetCount!=null ? (" of "+opts.targetCount) : "");
+    if (newCount > prevCount) {
+      const flash = modal.querySelector("#camScanFlash");
+      if (flash) {
+        flash.style.transition = "none"; flash.style.opacity = "0.55";
+        requestAnimationFrame(function(){ flash.style.transition = "opacity .4s"; flash.style.opacity = "0"; });
+      }
+      showToast("Scanned: "+code);
+    }
+    if (opts.targetCount != null && newCount >= opts.targetCount) {
+      setTimeout(function(){ closeCameraScan(); }, 500);
+    }
+  }
+  // opts: { targetCount:Number|null, getCount:function()->Number, feed:function(code) }
+  function openCameraScan(opts){
+    closeCameraScan();
+    opts = opts || {};
+    const modal = document.createElement("div");
+    modal.className = "modal-backdrop";
+    modal.style.zIndex = "60";
+    modal.innerHTML =
+      '<div class="card modal" style="max-width:420px;text-align:center;">'+
+        '<h3 style="margin-bottom:10px;">Scan Serial Numbers</h3>'+
+        '<div id="camScanCount" style="font-weight:700;margin-bottom:10px;">Scanned 0'+(opts.targetCount!=null?(' of '+opts.targetCount):'')+'</div>'+
+        '<div id="camScanVideoWrap" style="position:relative;border-radius:12px;overflow:hidden;background:#000;min-height:220px;display:flex;align-items:center;justify-content:center;">'+
+          '<video id="camScanVideo" playsinline autoplay muted style="width:100%;max-height:320px;display:block;"></video>'+
+          '<div id="camScanFlash" style="position:absolute;inset:0;background:var(--good);opacity:0;pointer-events:none;"></div>'+
+        '</div>'+
+        '<div id="camScanMsg" style="color:var(--muted);font-size:13px;margin-top:10px;"></div>'+
+        '<button class="btn btn-primary" id="camScanDoneBtn" style="margin-top:16px;">Done — Close Camera</button>'+
+      '</div>';
+    document.body.appendChild(modal);
+    cameraScan = { stream:null, rafId:null, lastCode:null, lastCodeAt:0, opts:opts, modalEl:modal };
+    modal.querySelector("#camScanDoneBtn").onclick = function(){ closeCameraScan(); };
+    modal.addEventListener("click", function(e){ if (e.target===modal) closeCameraScan(); });
+
+    const msgEl = modal.querySelector("#camScanMsg");
+    const videoWrap = modal.querySelector("#camScanVideoWrap");
+    function unsupported(){
+      videoWrap.style.display = "none";
+      msgEl.textContent = "Camera scanning isn’t available on this device/browser — use manual entry below.";
+    }
+    if (!("BarcodeDetector" in window)) { unsupported(); return; }
+    if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) { unsupported(); return; }
+
+    navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment" } }).then(function(stream){
+      if (!cameraScan || cameraScan.modalEl !== modal) { try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){} return; }
+      cameraScan.stream = stream;
+      const video = modal.querySelector("#camScanVideo");
+      video.srcObject = stream;
+      video.play().catch(function(){});
+      let detector;
+      try {
+        detector = new BarcodeDetector({ formats:["code_128","code_39","ean_13","qr_code","upc_a","upc_e"] });
+      } catch(e){ unsupported(); return; }
+      function loop(){
+        if (!cameraScan || cameraScan.modalEl !== modal) return;
+        detector.detect(video).then(function(codes){
+          if (!cameraScan || cameraScan.modalEl !== modal) return;
+          if (codes && codes.length) {
+            const code = (codes[0].rawValue||"").trim();
+            const now = Date.now();
+            if (code && (code !== cameraScan.lastCode || now - cameraScan.lastCodeAt > 3000)) {
+              cameraScan.lastCode = code; cameraScan.lastCodeAt = now;
+              handleCameraCode(code);
+            }
+          }
+          if (cameraScan && cameraScan.modalEl === modal) cameraScan.rafId = requestAnimationFrame(loop);
+        }).catch(function(){
+          if (cameraScan && cameraScan.modalEl === modal) cameraScan.rafId = requestAnimationFrame(loop);
+        });
+      }
+      cameraScan.rafId = requestAnimationFrame(loop);
+    }).catch(function(){
+      unsupported();
+    });
+  }
+
   function findTaskByNameOrAlias(label){
     const key = (label||"").trim().toLowerCase();
     if (!key) return null;
@@ -968,6 +1103,46 @@
     }) || null;
   }
 
+  // Feature 4 (weekly pending-serials tracking): for every week that has ANY activity on
+  // the serial task, computes target (sum of `made` across that week's serial-task
+  // entries) and scanned (count of that week's serial rows for the serial task). Computed
+  // fresh from raw data every time — nothing is carried forward week to week.
+  function serialWeekTargets(){
+    const map = {};
+    function bucket(key, start){
+      if (!map[key]) map[key] = { target:0, scanned:0, start:start };
+      return map[key];
+    }
+    STATE.entries.forEach(function(e){
+      if (e.taskId !== STATE.serialTaskId) return;
+      const key = weekKeyOf(e.entryDate);
+      bucket(key, weekStartFor(e.entryDate)).target += e.made;
+    });
+    STATE.serials.forEach(function(s){
+      if (s.taskId !== STATE.serialTaskId) return;
+      const basis = s.entryDate || s.ts;
+      const key = weekKeyOf(basis);
+      bucket(key, weekStartFor(basis)).scanned += 1;
+    });
+    return map;
+  }
+  // Past (non-current) weeks whose serial-task target hasn't been fully scanned yet —
+  // feeds the manager-dashboard catch-up reminder. Each week is kept accounted separately
+  // under its own week key; a shortfall never rolls forward into the current week.
+  function serialCatchupWeeks(){
+    const map = serialWeekTargets();
+    const curKey = weekKeyOf(new Date());
+    const out = [];
+    Object.keys(map).forEach(function(key){
+      if (key === curKey) return;
+      const info = map[key];
+      if (info.target > 0 && info.scanned < info.target) {
+        out.push({ key:key, start:info.start, target:info.target, scanned:info.scanned, shortfall: info.target - info.scanned });
+      }
+    });
+    out.sort(function(a,b){ return b.start - a.start; });
+    return out;
+  }
   function aggregateWeek(weekKey){
     const byTask = {};
     STATE.entries.forEach(function(e){
@@ -1230,6 +1405,7 @@
       case "otherJobLabel": return kioskShell(otherJobLabelBody());
       case "enterMade": return kioskShell(enterMadeBody());
       case "enterFaults": return kioskShell(enterFaultsBody());
+      case "scanPrompt": return kioskShell(scanPromptBody());
       case "scanSerials": return kioskShell(scanSerialsBody());
       case "askAnother": return kioskShell(askAnotherBody());
       default: return kioskShell(confirmOwnerBody(assignedId));
@@ -1352,7 +1528,10 @@
   function enterFaultsBody(){
     const isSerialTask = ui.taskId === STATE.serialTaskId;
     const btnLabel = isSerialTask ? "Next" : "Submit";
-    const btnAction = isSerialTask ? "App.goScanSerials()" : "App.submitFaults()";
+    // Feature 3: for the serial task, "Submit" no longer jumps straight into scanning —
+    // it goes to an interstitial prompt (scanPromptBody) that lets the worker scan now or
+    // defer to later, without blocking their flow either way.
+    const btnAction = isSerialTask ? "App.goScanPrompt()" : "App.submitFaults()";
     const task = findTask(ui.taskId);
     const isTouchup = task && Object.prototype.hasOwnProperty.call(TOUCHUP_PARTS, task.name.trim().toLowerCase());
     let question = "How many failed or faulty?";
@@ -1391,16 +1570,32 @@
     const errVal = ui.serialError ? escapeHtml(ui.serialError.value) : "";
     const errClass = ui.serialError ? " input-error" : "";
     const errMsg = ui.serialError ? '<div style="color:var(--bad);font-size:13px;margin-top:-8px;">'+escapeHtml(ui.serialError.message)+'</div>' : "";
+    const serialTask = findTask(STATE.serialTaskId);
     return (
-      '<div class="task-name-tag">7000AI PROVISIONING</div>'+
+      '<div class="task-name-tag">'+escapeHtml(serialTask?serialTask.name:"Serials")+'</div>'+
       '<div class="kiosk-title" style="margin-top:12px;">Scan or type each passed unit’s serial number</div>'+
       '<div class="kiosk-sub">Only good/passed units need one. '+list.length+' of '+needed+' entered'+(remaining>0?(' — '+remaining+' to go'):'')+'</div>'+
       '<div class="kiosk-body">'+
-        '<input class="big'+errClass+'" type="text" id="serialInput" data-autofocus="1" value="'+errVal+'" placeholder="Scan or type serial, then Enter" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addScannedSerial();}">'+
+        '<button class="btn btn-ghost" onclick="App.openCameraForWorkerScan()">📷 Scan with camera</button>'+
+        '<input class="big'+errClass+'" type="text" id="serialInput" data-autofocus="1" value="'+errVal+'" placeholder="Or type serial, then Enter" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addScannedSerial();}">'+
         errMsg+
         '<button class="btn btn-ghost" onclick="App.addScannedSerial()">Add Serial</button>'+
         (rows ? '<div class="confirm-summary" style="max-height:220px;overflow-y:auto;">'+rows+'</div>' : "")+
         '<button class="btn btn-primary" '+(canSubmit?"":"disabled")+' onclick="App.submitFaults()">Submit</button>'+
+        '<button class="link-btn" onclick="App.goto(\'enterFaults\')">Back</button>'+
+      '</div>'
+    );
+  }
+  function scanPromptBody(){
+    const needed = Math.max(0, ui.made - ui.faults);
+    const serialTask = findTask(STATE.serialTaskId);
+    return (
+      '<div class="task-name-tag">'+escapeHtml(serialTask?serialTask.name:"Serials")+'</div>'+
+      '<div class="kiosk-title" style="margin-top:12px;">You made '+needed+' good unit'+(needed===1?"":"s")+' — scan their serial numbers now?</div>'+
+      '<div class="kiosk-sub">You can scan them with the camera or type them in. If now’s not a good time, you can catch up later from here or the manager dashboard.</div>'+
+      '<div class="kiosk-body">'+
+        '<button class="btn btn-primary" onclick="App.goScanSerials()">Scan now</button>'+
+        '<button class="btn btn-ghost" onclick="App.deferScanning()">Do this later</button>'+
         '<button class="link-btn" onclick="App.goto(\'enterFaults\')">Back</button>'+
       '</div>'
     );
@@ -1537,8 +1732,15 @@
     const showAll = !!ui.serialsShowAll;
     const list = (showAll ? STATE.serials.slice() : STATE.serials.filter(function(s){ return weekKeyOf(s.ts)===curKey; }))
       .sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
-    const header = '<div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">'+
-      '<span>Scanned Serial Numbers · '+(showAll?"All-Time":"This Week")+' ('+list.length+')</span>'+
+    // Feature 4: "(X out of Y)" this-week pending indicator — X scanned vs Y targeted
+    // (sum of `made` for the serial task this week). Falls back to the plain count when
+    // there's no target yet (Y===0) or when viewing All-Time, matching prior behavior.
+    const weekInfo = serialWeekTargets()[curKey];
+    const curTarget = weekInfo ? weekInfo.target : 0;
+    const curScanned = weekInfo ? weekInfo.scanned : 0;
+    const countLabel = (!showAll && curTarget > 0) ? ('('+curScanned+' out of '+curTarget+')') : ('('+list.length+')');
+    const header = '<div class="section-title" id="serialsPanelAnchor" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">'+
+      '<span>Scanned Serial Numbers · '+(showAll?"All-Time":"This Week")+' '+countLabel+'</span>'+
       '<div style="display:flex;gap:8px;flex-wrap:wrap;">'+
         '<button class="link-btn" style="margin:0;" onclick="App.toggleSerialsShowAll()">'+(showAll?"Show This Week":"Show All-Time")+'</button>'+
         '<button class="link-btn" style="margin:0;" onclick="App.toggleSerialsCollapse()">'+(collapsed?"▸ Expand":"▾ Collapse")+'</button>'+
@@ -1556,11 +1758,18 @@
         '<div class="actions"><button class="chip-btn" onclick="App.startSerialEdit(\''+s.id+'\')">Edit</button><button class="chip-btn danger" onclick="App.deleteSerial(\''+s.id+'\')">Delete</button></div></div>';
     }).join("");
 
+    // Feature 2/4: date this manually-added/scanned serial is attributed to — defaults to
+    // today, but App.startCatchupScan() (Feature 4) can preset it to a past week's start
+    // so catch-up serials land in that week, not today's.
+    const manualDate = ui.serialManualDate || todayDateOnly();
+    const manualDateMin = dateOnlyStr((function(){ const d = new Date(); d.setDate(d.getDate()-60); return d; })());
     return header +
       '<div class="card panel">'+
         '<div class="row-form">'+
           '<input type="text" id="newSerialManual" placeholder="Add a serial manually">'+
+          '<input type="date" id="newSerialManualDate" value="'+manualDate+'" min="'+manualDateMin+'" max="'+todayDateOnly()+'" onchange="App.setSerialManualDate(this.value)" title="Date these serials are attributed to">'+
           '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.addSerialManual()">Add</button>'+
+          '<button class="chip-btn" onclick="App.openCameraForManualAdd()">📷 Scan with camera</button>'+
           '<button class="chip-btn" onclick="App.copySerials()">📋 Copy List</button>'+
         '</div>'+
         (rows || '<div style="color:var(--muted);font-size:14px;">No serial numbers logged yet.</div>')+
@@ -1692,6 +1901,42 @@
       '</div>'
     );
   }
+  // Feature 4: reminder banner on the manager dashboard listing any PAST week whose
+  // serial-task target wasn't fully scanned. Each shows a "Catch up" button that presets
+  // the manual-add date to that week's start (App.startCatchupScan) so newly-added serials
+  // get attributed to that week, not today.
+  function serialCatchupBanner(){
+    if (!STATE.serialTaskId) return "";
+    const weeks = serialCatchupWeeks();
+    if (!weeks.length) return "";
+    const rows = weeks.map(function(w){
+      return '<div class="list-row"><div>'+
+          '<b>'+w.shortfall+'</b> unit'+(w.shortfall===1?"":"s")+' from the week of '+escapeHtml(fmtDateShort(w.start))+' still need'+(w.shortfall===1?"s":"")+' serials scanned '+
+          '<span style="color:var(--muted);font-size:12.5px;">('+w.scanned+' of '+w.target+' done)</span>'+
+        '</div>'+
+        '<button class="chip-btn" onclick="App.startCatchupScan(\''+dateOnlyStr(w.start)+'\')">Catch up</button>'+
+      '</div>';
+    }).join("");
+    return '<div class="card banner" style="background:var(--warn-soft);flex-direction:column;align-items:stretch;gap:4px;">'+
+      '<div style="font-weight:700;">⚠ Pending serial scans from past weeks</div>'+
+      rows+
+    '</div>';
+  }
+  // Feature 5: week/month options for the summary CSV downloads — like the Last Week
+  // Summary picker above, but includes the CURRENT week/month too (downloads default to
+  // it) alongside every past period that has entry data.
+  function downloadWeekOptions(){
+    const keys = {};
+    keys[weekKeyOf(new Date())] = true;
+    STATE.entries.forEach(function(e){ keys[weekKeyOf(e.entryDate)] = true; });
+    return Object.keys(keys).sort(function(a,b){ return new Date(b) - new Date(a); });
+  }
+  function downloadMonthOptions(){
+    const keys = {};
+    keys[monthKeyOf(new Date())] = true;
+    STATE.entries.forEach(function(e){ keys[monthKeyOf(e.entryDate)] = true; });
+    return Object.keys(keys).sort(function(a,b){ return a<b?1:(a>b?-1:0); });
+  }
   // Fix 5 (Last Week Summary week-picker): available past weeks are derived from
   // whichever weeks actually have entries (via entryDate), plus the most recently
   // completed week so it's always selectable as the default even with no data yet.
@@ -1779,8 +2024,22 @@
     });
     const cards = tasks.map(function(t){ return taskCardHtml(t, curAgg, {}); }).join("");
 
+    // Feature 5: week/month pickers for the CSV downloads. Default to the current week /
+    // current month (matching prior always-current behavior) but let the manager pick any
+    // past period that has entry data.
+    const dlWeekKeys = downloadWeekOptions();
+    const dlWeekKey = (ui.downloadWeekKey && dlWeekKeys.indexOf(ui.downloadWeekKey) > -1) ? ui.downloadWeekKey : curKey;
+    const dlWeekOptsHtml = dlWeekKeys.map(function(k){
+      const s = parseDateBasis(k);
+      return '<option value="'+k+'"'+(k===dlWeekKey?' selected':'')+'>'+escapeHtml(fmtRange(s))+'</option>';
+    }).join("");
+    const curMonthKey = monthKeyOf(now);
+    const dlMonthKeys = downloadMonthOptions();
+    const dlMonthKey = (ui.downloadMonthKey && dlMonthKeys.indexOf(ui.downloadMonthKey) > -1) ? ui.downloadMonthKey : curMonthKey;
+
     return (
       reassignBanner+
+      serialCatchupBanner()+
       '<div class="card week-banner">'+
         '<div><h2>Current Week</h2><div class="sub">'+fmtRange(curStart)+' · resets Saturday</div></div>'+
         '<div class="toolbar">'+
@@ -1794,8 +2053,14 @@
           '<button onclick="App.gotoManager(\'workers\')">Manage Workers</button>'+
           '<button onclick="App.gotoManager(\'settings\')">Settings</button>'+
           '<button onclick="App.openModal(\'reassign\')">🔓 Open Reassignment Window</button>'+
-          '<button onclick="App.downloadWeeklySummary()">⬇ Download Weekly Summary</button>'+
-          '<button onclick="App.downloadMonthlySummary()">⬇ Download Monthly Summary</button>'+
+          '<span style="display:inline-flex;gap:6px;align-items:center;">'+
+            '<select id="downloadWeekSelect" onchange="App.setDownloadWeek(this.value)" style="padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:13px;">'+dlWeekOptsHtml+'</select>'+
+            '<button onclick="App.downloadWeeklySummary()">⬇ Weekly Summary</button>'+
+          '</span>'+
+          '<span style="display:inline-flex;gap:6px;align-items:center;">'+
+            '<input type="month" id="downloadMonthSelect" value="'+dlMonthKey+'" max="'+curMonthKey+'" onchange="App.setDownloadMonth(this.value)" style="padding:8px 10px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:13px;">'+
+            '<button onclick="App.downloadMonthlySummary()">⬇ Monthly Summary</button>'+
+          '</span>'+
         '</div>'+
       '</div>'+
 
@@ -2121,10 +2386,29 @@
       const val = toSignedInt(input ? input.value : 0);
       setUi({ screen:"enterFaults", made:val });
     },
-    goScanSerials: function(){
+    // Feature 3: interstitial between "faults entered" and "scan serials" for the serial
+    // task — lets the worker scan now or defer without blocking their flow. Skipped
+    // automatically when there are zero good units to scan (nothing to prompt about).
+    goScanPrompt: function(){
       const input = document.getElementById("faultsInput");
       const faults = clamp0(Math.min(clamp0(input ? input.value : 0), ui.made));
+      const needed = Math.max(0, ui.made - faults);
+      if (needed <= 0) { setUi({ faults:faults }); App.submitFaults(); return; }
+      setUi({ screen:"scanPrompt", faults:faults });
+    },
+    goScanSerials: function(){
+      // Reached either directly (legacy callers) or via "Scan now" on scanPromptBody —
+      // ui.faults is already set by goScanPrompt in the latter case, and #faultsInput may
+      // no longer be on screen, so prefer the already-known value when present.
+      const input = document.getElementById("faultsInput");
+      const faults = (ui.screen === "scanPrompt") ? ui.faults : clamp0(Math.min(clamp0(input ? input.value : 0), ui.made));
       setUi({ screen:"scanSerials", faults:faults, serialsList: [], serialError:null });
+    },
+    // Feature 3: "Do this later" on scanPromptBody — logs the made/faults entry exactly
+    // like a normal (non-scanning) submit, leaving this batch's serials unscanned/pending
+    // (they show up in Feature 4's weekly target vs scanned count until caught up).
+    deferScanning: function(){
+      App.submitFaults();
     },
     addScannedSerial: function(){
       const input = document.getElementById("serialInput");
@@ -2149,11 +2433,44 @@
       list.splice(idx,1);
       setUi({ serialsList:list });
     },
+    // Feature 2: camera scanning for the worker's just-finished-a-job flow — each
+    // detected barcode is fed into the SAME addScannedSerial() the manual input uses, so
+    // it gets identical validation/dedup, and multiple units can be scanned back-to-back
+    // without reopening the camera (auto-closes once the batch's target count is reached).
+    openCameraForWorkerScan: function(){
+      openCameraScan({
+        targetCount: Math.max(0, ui.made - ui.faults),
+        getCount: function(){ return (ui.serialsList||[]).length; },
+        feed: function(code){
+          const el = document.getElementById("serialInput");
+          if (el) el.value = code;
+          App.addScannedSerial();
+        }
+      });
+    },
+    // Feature 2: camera scanning for the manager's standalone "add a serial manually" row
+    // (serialPanelSection) — feeds each detected barcode into the SAME addSerialManual()
+    // the manual input uses (including whatever date is set in the adjacent date picker).
+    // There's no fixed batch target here, so the camera stays open until "Done" is tapped.
+    openCameraForManualAdd: function(){
+      let sessionCount = 0;
+      openCameraScan({
+        targetCount: null,
+        getCount: function(){ return sessionCount; },
+        feed: function(code){
+          const before = STATE.serials.length;
+          const el = document.getElementById("newSerialManual");
+          if (el) el.value = code;
+          App.addSerialManual();
+          if (STATE.serials.length > before) sessionCount++;
+        }
+      });
+    },
     submitFaults: function(){
       const workerId = getAssignedWorkerId();
       const made = ui.made;
       let faults;
-      if (ui.screen === "scanSerials") {
+      if (ui.screen === "scanSerials" || ui.screen === "scanPrompt") {
         faults = ui.faults;
       } else {
         const input = document.getElementById("faultsInput");
@@ -2173,7 +2490,11 @@
           setUi({ screen:"askAnother", faults:faults, pendingReview:true, resolvedName:null, serialsCount:null });
         }
       } else {
-        const serialsToSave = (ui.taskId === STATE.serialTaskId) ? (ui.serialsList||[]) : null;
+        // Feature 3: only require/attach the scanned serials when we're actually coming
+        // out of the scan flow (screen==="scanSerials") — a "Do this later" defer from
+        // scanPromptBody submits the entry normally with no serials attached, leaving this
+        // batch's units pending (tracked by Feature 4's weekly target vs scanned count).
+        const serialsToSave = (ui.taskId === STATE.serialTaskId && ui.screen === "scanSerials") ? (ui.serialsList||[]) : null;
         if (serialsToSave) {
           const needed = Math.max(0, made - faults);
           if (serialsToSave.length !== needed) { showToast("Enter all "+needed+" serial number(s) first."); return; }
@@ -2182,7 +2503,9 @@
         if (serialsToSave && serialsToSave.length) {
           const ts = new Date().toISOString();
           serialsToSave.forEach(function(s){
-            STATE.serials.push({ id:uid("s"), serial:s, taskId:ui.taskId, workerId:workerId, entryId:entry.id, ts:ts });
+            // Feature 4: attribute each serial to the same entryDate as the entry it came
+            // from (not necessarily today, if this was a late/backdated entry).
+            STATE.serials.push({ id:uid("s"), serial:s, taskId:ui.taskId, workerId:workerId, entryId:entry.id, ts:ts, entryDate:entryDate });
           });
         }
         setUi({ screen:"askAnother", faults:faults, resolvedName:null, pendingReview:false, serialsList:null, serialsCount: serialsToSave ? serialsToSave.length : null });
@@ -2384,9 +2707,31 @@
       const fmtErr = validateSerialFormat(val);
       if (fmtErr) { showToast(fmtErr); return; }
       if (STATE.serials.some(function(s){ return s.serial===val; })) { showToast("Already recorded — enter a different serial."); return; }
-      STATE.serials.push({ id:uid("s"), serial:val, taskId:STATE.serialTaskId, workerId:null, entryId:null, ts:new Date().toISOString() });
+      // Feature 4: attribute this standalone/manual serial to whatever date is set in the
+      // adjacent date picker (defaults to today; App.startCatchupScan presets it to a past
+      // week's start for catch-up scanning), not always today.
+      const dateInput = document.getElementById("newSerialManualDate");
+      let entryDate = (dateInput && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.value)) ? dateInput.value : todayDateOnly();
+      if (entryDate > todayDateOnly()) entryDate = todayDateOnly();
+      STATE.serials.push({ id:uid("s"), serial:val, taskId:STATE.serialTaskId, workerId:null, entryId:null, ts:new Date().toISOString(), entryDate:entryDate });
       persist(false, "Serial added.", "Saved locally — will sync.");
       render();
+    },
+    setSerialManualDate: function(val){
+      if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return;
+      setUi({ serialManualDate: val });
+    },
+    // Feature 4: catch-up entry point for a past week whose serial target wasn't fully
+    // scanned — presets the standalone-add date picker to that week's start (still
+    // editable) and surfaces the serials panel so new serials land in that week, not today.
+    startCatchupScan: function(weekStartStr){
+      setSerialsCollapsed(false);
+      setUi({ serialManualDate: weekStartStr, serialsShowAll:true });
+      showToast("Serial date set to the week of "+fmtDateShort(parseDateBasis(weekStartStr))+" — scan or add serials below.");
+      setTimeout(function(){
+        const el = document.getElementById("serialsPanelAnchor");
+        if (el && el.scrollIntoView) el.scrollIntoView({ behavior:"smooth", block:"start" });
+      }, 50);
     },
     startSerialEdit: function(id){ setUi({ editingSerialId:id }); },
     cancelSerialEdit: function(){ setUi({ editingSerialId:null }); },
@@ -2525,10 +2870,19 @@
       standupOverlayState = null;
       render();
     },
+    setDownloadWeek: function(val){
+      if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return;
+      setUi({ downloadWeekKey: val });
+    },
+    setDownloadMonth: function(val){
+      if (!val || !/^\d{4}-\d{2}$/.test(val)) return;
+      setUi({ downloadMonthKey: val });
+    },
     downloadWeeklySummary: function(){
-      const now = new Date();
-      const curStart = weekStartFor(now);
-      const curKey = weekKeyOf(now);
+      // Feature 5: download whichever week is selected in the picker (defaults to the
+      // current week, matching prior always-current behavior).
+      const curKey = ui.downloadWeekKey || weekKeyOf(new Date());
+      const curStart = weekStartFor(curKey);
       const agg = aggregateWeek(curKey);
       const rows = [];
       rows.push(["Shift Floor Weekly Summary"]);
@@ -2569,16 +2923,19 @@
       showToast("Weekly summary downloaded.");
     },
     downloadMonthlySummary: function(){
-      const now = new Date();
-      const mStart = monthStartFor(now);
-      const mEnd = monthEndFor(now);
-      const monthKey = monthKeyOf(now);
-      const isPartial = now < mEnd;
+      // Feature 5: download whichever month is selected in the picker (defaults to the
+      // current month). isPartial is recomputed from the SELECTED month's own end date, so
+      // it correctly stays true only for the current (not-yet-complete) month and never
+      // fires for a fully-completed past month.
+      const monthKey = ui.downloadMonthKey || monthKeyOf(new Date());
+      const mStart = monthStartFor(monthKey+"-01");
+      const mEnd = monthEndFor(monthKey+"-01");
+      const isPartial = new Date() < mEnd;
       const agg = aggregateMonth(monthKey);
       const rows = [];
       rows.push(["Shift Floor Monthly Summary"]);
       rows.push(["Month", fmtMonthLabel(mStart)]);
-      if (isPartial) rows.push(["Note", "Partial month data through "+now.getFullYear()+"-"+pad2(now.getMonth()+1)+"-"+pad2(now.getDate())]);
+      if (isPartial) { const today = new Date(); rows.push(["Note", "Partial month data through "+today.getFullYear()+"-"+pad2(today.getMonth()+1)+"-"+pad2(today.getDate())]); }
       rows.push([]);
       rows.push(["Task Summary"]);
       rows.push(["Task","Made","Faults","Yield %","Fault Rate %"]);
