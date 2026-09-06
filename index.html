@@ -1069,7 +1069,11 @@
       // The day this entry is attributed to for weekly/monthly/YTD bucketing (Fix 3) —
       // distinct from ts, which stays the real submission moment for audit/ordering.
       entryDate: opts.entryDate || dateOnlyStr(ts),
-      by: by
+      by: by,
+      // Fix 4: when set (manager id, e.g. "mark"/"daniel"), this entry was submitted via
+      // the "Enter for a Worker" flow on that manager's behalf — distinct from a normal
+      // worker self-entry — so it can be attributed as "Entered by <mgr> for <worker>".
+      enteredByManager: opts.enteredByManager || null
     };
     STATE.entries.push(entry);
     persist(false, opts.successMsg, opts.failMsg);
@@ -1307,20 +1311,23 @@
   // entry screens ("Logging <task> for <date>"), plus a toggle that reveals a bounded
   // date picker for a late entry. The chosen date is read back by submitFaults() as
   // ui.entryDate and stored on the entry as entryDate (see addEntry).
-  function entryDateBlock(){
+  function entryDateBlock(opts){
+    opts = opts || {};
     const chosen = ui.entryDate || todayDateOnly();
     const chosenD = parseDateBasis(chosen);
-    const label = fmtDateShort(chosenD)+" "+chosenD.getFullYear();
+    const dateLabel = fmtDateShort(chosenD)+" "+chosenD.getFullYear();
+    const introPrefix = opts.introPrefix !== undefined ? opts.introPrefix : ('Logging <b>'+escapeHtml(taskLabelForUi())+'</b>');
+    const introLine = '<div class="kiosk-sub" style="margin-bottom:2px;">'+introPrefix+' for <b>'+dateLabel+'</b></div>';
     if (!ui.entryDateEditing) {
       return (
-        '<div class="kiosk-sub" style="margin-bottom:2px;">Logging <b>'+escapeHtml(taskLabelForUi())+'</b> for <b>'+label+'</b></div>'+
+        introLine+
         '<button type="button" class="link-btn" style="margin-top:0;" onclick="App.toggleEntryDateEdit(true)">This is a late entry — use a different date</button>'
       );
     }
     const minStr = dateOnlyStr((function(){ const d = new Date(); d.setDate(d.getDate()-60); return d; })());
     const maxStr = todayDateOnly();
     return (
-      '<div class="kiosk-sub" style="margin-bottom:2px;">Logging <b>'+escapeHtml(taskLabelForUi())+'</b> for <b>'+label+'</b></div>'+
+      introLine+
       '<div class="field" style="text-align:left;">'+
         '<label>Entry date (up to 60 days back, not in the future)</label>'+
         '<input type="date" id="entryDateInput" value="'+chosen+'" min="'+minStr+'" max="'+maxStr+'" onchange="App.setEntryDate(this.value)" style="padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px;">'+
@@ -1472,7 +1479,13 @@
     let recent = '<div class="task-recent">No updates yet this week.</div>';
     if (a && a.lastEntry) {
       const w = findWorker(a.lastEntry.workerId);
-      const whoText = a.lastEntry.by === "manager" ? "entered by manager" : escapeHtml(w?w.name:"unknown");
+      let whoText;
+      if (a.lastEntry.by === "manager") {
+        const mgr = a.lastEntry.enteredByManager ? (STATE.managers||[]).find(function(m){ return m.id===a.lastEntry.enteredByManager; }) : null;
+        whoText = mgr ? escapeHtml("Entered by "+mgr.name+" for "+(w?w.name:"worker")) : "entered by manager";
+      } else {
+        whoText = escapeHtml(w?w.name:"unknown");
+      }
       recent = '<div class="task-recent">+<b>'+a.lastEntry.made+'</b> made / <b>'+a.lastEntry.faults+'</b> faults — '+fmtRelTime(a.lastEntry.ts)+' · '+whoText+'</div>';
     }
     const pinBtn = opts.pinned
@@ -1644,22 +1657,29 @@
       const t = findTask(e.taskId);
       const workerName = w ? w.name : (e.by==="manager" ? "(manager entry)" : "Unknown worker");
       const taskName = t ? t.name : "(deleted task)";
+      // Fix 4: a manager-entered-on-behalf-of-worker row gets a distinct attribution line.
+      const attrMgr = e.enteredByManager ? (STATE.managers||[]).find(function(m){ return m.id===e.enteredByManager; }) : null;
+      const attributionName = attrMgr ? ("Entered by "+attrMgr.name+" for "+workerName) : workerName;
       if (ui.editingEntryId === e.id) {
+        const editDate = e.entryDate || dateOnlyStr(e.ts);
+        const minEditStr = dateOnlyStr((function(){ const d = new Date(); d.setFullYear(d.getFullYear()-1); return d; })());
+        const maxEditStr = todayDateOnly();
         return '<div class="list-row" style="flex-wrap:wrap;">'+
-          '<div style="flex:1;min-width:200px;"><b>'+escapeHtml(workerName)+'</b> — '+escapeHtml(taskName)+'</div>'+
+          '<div style="flex:1;min-width:200px;"><b>'+escapeHtml(attributionName)+'</b> — '+escapeHtml(taskName)+'</div>'+
           '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'+
             '<input type="number" min="0" id="editEntryMade-'+e.id+'" value="'+e.made+'" style="width:74px;padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);"> made'+
             '<input type="number" min="0" id="editEntryFaults-'+e.id+'" value="'+e.faults+'" style="width:74px;padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);"> faults'+
+            '<input type="date" id="editEntryDate-'+e.id+'" value="'+editDate+'" min="'+minEditStr+'" max="'+maxEditStr+'" style="padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
             '<button class="chip-btn" onclick="App.saveEntryEdit(\''+e.id+'\')">Save</button>'+
             '<button class="chip-btn" onclick="App.cancelEntryEdit()">Cancel</button>'+
           '</div></div>';
       }
       if (ui.confirmDeleteEntryId === e.id) {
-        return '<div class="list-row"><div>Delete this entry for <b>'+escapeHtml(workerName)+'</b> — '+escapeHtml(taskName)+'?</div>'+
+        return '<div class="list-row"><div>Delete this entry for <b>'+escapeHtml(attributionName)+'</b> — '+escapeHtml(taskName)+'?</div>'+
           '<div class="actions"><button class="chip-btn danger" onclick="App.deleteEntry(\''+e.id+'\')">Confirm Delete</button>'+
           '<button class="chip-btn" onclick="App.cancelDeleteEntry()">Cancel</button></div></div>';
       }
-      return '<div class="list-row"><div><div><b>'+escapeHtml(workerName)+'</b> — '+escapeHtml(taskName)+'</div>'+
+      return '<div class="list-row"><div><div><b>'+escapeHtml(attributionName)+'</b> — '+escapeHtml(taskName)+'</div>'+
         '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · for '+escapeHtml(e.entryDate||"—")+' · logged '+fmtRelTime(e.ts)+'</div></div>'+
         '<div class="actions"><button class="chip-btn" onclick="App.startEntryEdit(\''+e.id+'\')">Edit</button>'+
         '<button class="chip-btn danger" onclick="App.startDeleteEntry(\''+e.id+'\')">Delete</button></div></div>';
@@ -1672,15 +1692,71 @@
       '</div>'
     );
   }
+  // Fix 5 (Last Week Summary week-picker): available past weeks are derived from
+  // whichever weeks actually have entries (via entryDate), plus the most recently
+  // completed week so it's always selectable as the default even with no data yet.
+  function lastWeekSummaryWeekOptions(){
+    const now = new Date();
+    const curKey = weekKeyOf(now);
+    const curStart = weekStartFor(now);
+    const defaultPrevStart = new Date(curStart); defaultPrevStart.setDate(defaultPrevStart.getDate()-7);
+    const defaultPrevKey = weekKeyOf(defaultPrevStart);
+    const keys = {};
+    STATE.entries.forEach(function(e){
+      const wk = weekKeyOf(e.entryDate);
+      if (wk !== curKey) keys[wk] = true;
+    });
+    keys[defaultPrevKey] = true;
+    const sorted = Object.keys(keys).sort(function(a,b){ return new Date(b) - new Date(a); });
+    return { keys: keys, sorted: sorted, defaultKey: defaultPrevKey };
+  }
+  function lastWeekSummaryPanel(){
+    const opts = lastWeekSummaryWeekOptions();
+    const selectedKey = (ui.lastWeekSummarySelectedWeek && opts.keys[ui.lastWeekSummarySelectedWeek])
+      ? ui.lastWeekSummarySelectedWeek : opts.defaultKey;
+    const selAgg = aggregateWeek(selectedKey);
+
+    const optionsHtml = opts.sorted.map(function(k){
+      const s = parseDateBasis(k);
+      return '<option value="'+k+'"'+(k===selectedKey?' selected':'')+'>'+escapeHtml(fmtRange(s))+'</option>';
+    }).join("");
+
+    const smtIds = resolveNamesToIds(SMT_YIELD_NAMES);
+    const thIds = resolveNamesToIds(THROUGHHOLE_YIELD_NAMES);
+    const testIds = resolveNamesToIds(TEST_YIELD_NAMES);
+    const comboRows = comboRowHtml("SMT Yield", smtIds, selAgg) +
+      comboRowHtml("Through-hole Yield", thIds, selAgg) +
+      comboRowHtml("Test Yield", testIds, selAgg);
+
+    const selTasks = STATE.tasks.filter(function(t){ return selAgg[t.id]; });
+    const tableRows = selTasks.map(function(t){
+      const a = selAgg[t.id];
+      const ppu = t.partsPerUnit || 1;
+      return '<tr><td>'+escapeHtml(t.name)+'</td><td class="num">'+a.made+'</td><td class="num">'+a.faults+'</td>'+
+        '<td class="num">'+fmtPct(yieldPct(a.made,a.faults,ppu))+'</td><td class="num">'+fmtPct(faultPct(a.made,a.faults,ppu))+'</td></tr>';
+    }).join("");
+
+    return (
+      '<div class="section-title">Last Week Summary</div>'+
+      '<div class="card panel">'+
+        '<div class="panel-head">'+
+          '<div><label style="display:block;font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:4px;">Week</label>'+
+            '<select id="lastWeekSummarySelect" onchange="App.setLastWeekSummaryWeek(this.value)">'+optionsHtml+'</select>'+
+          '</div>'+
+        '</div>'+
+        comboRows+
+        (tableRows ?
+          '<div class="table-wrap" style="margin-top:14px;"><table class="data-table"><thead><tr><th>Task</th><th class="num">Made</th><th class="num">Faults</th><th class="num">Yield</th><th class="num">Fault Rate</th></tr></thead><tbody>'+tableRows+'</tbody></table></div>'
+          : '<div style="color:var(--muted);font-size:14px;margin-top:10px;">No activity recorded for this week.</div>')+
+      '</div>'
+    );
+  }
   function managerDashboardBody(){
     const now = new Date();
     const curStart = weekStartFor(now);
     const curKey = weekKeyOf(now);
-    const prevStart = new Date(curStart); prevStart.setDate(prevStart.getDate()-7);
-    const prevKey = weekKeyOf(prevStart);
 
     const curAgg = aggregateWeek(curKey);
-    const prevAgg = aggregateWeek(prevKey);
     const pendingCount = STATE.pendingRequests.filter(function(r){ return r.status==="pending"; }).length;
 
     const headlineTask = findTask(STATE.headlineTaskId);
@@ -1702,16 +1778,6 @@
       return a.name.localeCompare(b.name);
     });
     const cards = tasks.map(function(t){ return taskCardHtml(t, curAgg, {}); }).join("");
-
-    const prevTasks = STATE.tasks.filter(function(t){ return prevAgg[t.id]; });
-    let prevMade=0, prevFaults=0;
-    const prevRows = prevTasks.map(function(t){
-      const a = prevAgg[t.id];
-      const ppu = t.partsPerUnit || 1;
-      prevMade += a.made; prevFaults += a.faults;
-      return '<tr><td>'+escapeHtml(t.name)+'</td><td class="num">'+a.made+'</td><td class="num">'+a.faults+'</td>'+
-        '<td class="num">'+fmtPct(yieldPct(a.made,a.faults,ppu))+'</td><td class="num">'+fmtPct(faultPct(a.made,a.faults,ppu))+'</td></tr>';
-    }).join("");
 
     return (
       reassignBanner+
@@ -1750,15 +1816,7 @@
       '<div class="section-title">Tasks · most recently updated first</div>'+
       (cards ? '<div class="task-grid">'+cards+'</div>' : '<div class="card" style="padding:20px;color:var(--muted);">No tasks yet — add one under Manage Tasks.</div>')+
 
-      '<div class="section-title">Last Week Summary</div>'+
-      '<div class="card panel">'+
-        '<div class="panel-head"><div><h3 style="font-size:18px;">'+fmtRange(prevStart)+'</h3></div>'+
-          '<div class="num" style="font-size:14px;color:var(--muted);">Total: '+prevMade+' made · '+prevFaults+' faults · '+fmtPct(yieldPct(prevMade,prevFaults))+' yield</div>'+
-        '</div>'+
-        (prevRows ?
-          '<div class="table-wrap"><table class="data-table"><thead><tr><th>Task</th><th class="num">Made</th><th class="num">Faults</th><th class="num">Yield</th><th class="num">Fault Rate</th></tr></thead><tbody>'+prevRows+'</tbody></table></div>'
-          : '<div style="color:var(--muted);font-size:14px;">No activity recorded last week.</div>')+
-      '</div>'+
+      lastWeekSummaryPanel()+
 
       '<div class="footer-note"><span>PIN-protected · visible to the manager only</span><button class="link-btn" onclick="App.logoutManager()">Log out of Manager view</button></div>'
     );
@@ -2018,6 +2076,7 @@
           '<div class="field"><label>Task</label><select id="efTask">'+tasks+'</select></div>'+
           '<div class="field"><label>Made / Tested</label><input type="number" min="0" id="efMade" placeholder="0"></div>'+
           '<div class="field"><label>Failed / Faulty</label><input type="number" min="0" id="efFaults" placeholder="0"></div>'+
+          '<div style="margin-bottom:6px;">'+entryDateBlock({ introPrefix:"Entering this on the worker’s behalf" })+'</div>'+
           '<div class="btn-row">'+
             '<button class="btn btn-ghost" onclick="App.closeModal()">Cancel</button>'+
             '<button class="btn btn-primary" onclick="App.submitEnterFor()">Save Entry</button>'+
@@ -2151,8 +2210,12 @@
     },
     logoutManager: function(){ setMgrIdentity(null); setUi({ mScreen:"dashboard" }); },
     gotoManager: function(screen){ setUi({ mScreen:screen }); },
-    openModal: function(name){ setUi({ modal:name }); },
-    closeModal: function(){ setUi({ modal:null }); },
+    openModal: function(name){
+      const patch = { modal:name };
+      if (name === "enterFor") { patch.entryDate = null; patch.entryDateEditing = false; }
+      setUi(patch);
+    },
+    closeModal: function(){ setUi({ modal:null, entryDate:null, entryDateEditing:false }); },
 
     addTask: function(){
       const input = document.getElementById("newTaskName");
@@ -2286,11 +2349,21 @@
       if (!e) return;
       const madeInput = document.getElementById("editEntryMade-"+id);
       const faultsInput = document.getElementById("editEntryFaults-"+id);
+      const dateInput = document.getElementById("editEntryDate-"+id);
       const made = clamp0(madeInput ? madeInput.value : e.made);
       const task = findTask(e.taskId);
       const ppu = (task && task.partsPerUnit) || 1;
       const faults = clamp0(Math.min(clamp0(faultsInput ? faultsInput.value : e.faults), made*ppu));
       e.made = made; e.faults = faults;
+      // Manager history correction (Fix 2): allow moving which day this entry is
+      // attributed to — this is what all the week/month/CSV aggregation already
+      // buckets by (see aggregateWeek/aggregateMonth, which read entry.entryDate,
+      // never ts), so changing it here automatically re-buckets the entry everywhere.
+      if (dateInput && dateInput.value && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.value)) {
+        const maxD = new Date(); maxD.setHours(0,0,0,0);
+        const picked = parseDateBasis(dateInput.value);
+        if (picked <= maxD) e.entryDate = dateInput.value;
+      }
       ui.editingEntryId = null; saveUi();
       persist(false, "Entry updated.");
       render();
@@ -2422,11 +2495,13 @@
       const made = clamp0(document.getElementById("efMade").value);
       const faults = clamp0(document.getElementById("efFaults").value);
       if (!w || !t) return;
-      addEntry(w, t, made, faults, "manager", { successMsg:"Entry saved." });
-      setUi({ modal:null });
+      const mgrId = getMgrIdentity();
+      addEntry(w, t, made, faults, "manager", { entryDate: ui.entryDate, enteredByManager: mgrId, successMsg:"Entry saved." });
+      setUi({ modal:null, entryDate:null, entryDateEditing:false });
       showToast("Entry saved for "+((findWorker(w)||{}).name||"worker")+".");
     },
     setSummaryYear: function(y){ setUi({ summaryYear:y }); },
+    setLastWeekSummaryWeek: function(weekKey){ setUi({ lastWeekSummarySelectedWeek: weekKey }); },
     saveStandupSchedule: function(){
       const enabledEl = document.getElementById("standupEnabled");
       const hourEl = document.getElementById("standupHour");
