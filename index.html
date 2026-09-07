@@ -497,9 +497,13 @@
     "4000-12 cpu board touch-up": null
   };
   const PPU_SEED_TAG = "v1-ppu-1";
+  const MANAGERS_SEED_TAG = "v1-lauren-1";
   const SMT_YIELD_NAMES = ["7000-03+01 BOTTOM INSP/REWORK","7000-03+01 TOP INSP/REWORK","7010-03+01 Power board TOP INSP/REWORK","7020-03+01 Camera board BOT INSP/REWORK","7020-03+01 Camera board TOP INSP/REWORK","4625 Modem Board BOT INSP/REWORK","4625 Modem Board TOP INSP/REWORK","4000-12 CPU BOT INSP/REWORK","4000-12 CPU TOP INSP/REWORK"];
   const THROUGHHOLE_YIELD_NAMES = ["7000-03+01 Main board TOUCH-UP","7010-03+01 Power board TOUCH-UP","7020-03+01 Camera board TOUCH-UP","4625 Modem board TOUCH-UP","4000-12 CPU board TOUCH-UP"];
   const TEST_YIELD_NAMES = ["7000-03+01 Main board TEST","7010-03+01 Power board TEST","7020-03+01 Camera board TEST","4625 SAT Modem Board Test","4000-12 CPU Board Test"];
+  // Feature: About panel QR code (points to this app so it can be opened on another
+  // tablet/phone) — base64 PNG generated ahead of time, embedded inline as a data URI.
+  const ABOUT_QR_B64 = "iVBORw0KGgoAAAANSUhEUgAAAQgAAAEIAQAAAACLjVdSAAABkUlEQVR4nO1YQW7EMBCCKv//Mj0MY3ulSj11FtWbSImTcCAjbPBQ+OX4+g3wQfxjBNQCUY0lqJ78OYXpDOKB/527BjXotylM5+rhWoiiSAjwBQpiOo6gWDOF1M+IGR5vRTx76FlCCGdBUpgO1sN/T4GCyHrUJI8UxOkvr2d/TmE6po81Nyj6juNtCtM5fQgdOWS5SOoPl+mjMhjk2zF/uiopTMcQ6uSFmi+WhlDGG8R0APE4d1EgAZGQlxG/TmE6g+BOo75QdADhhfm0klf9ftWgZLETewrTMQTrrEkiSCSIKs0kjwgE18aNDut8jasxTAf1ARGUQLsvyC2QIKYDiAoZHT06mXUYgS7MHxRBvegDAEDd6i82FW/0O5nZdVOYDq6n6l6QI0fnsVv14WEbjJbt3Jc/nqUG1fZF9l5WRzWH6Vg9Vied6p3MDiE5TOfqsfrrbgntRfW+9eNAUOCSibzORjL9Q8TRX7fteqg7/fbor3vRcJcdbTUpTOfqYYOhM1k9yIkkhul4/ngrjw8iE/ENFL7bvb84SNoAAAAASUVORK5CYII=";
   const COMBO_SEED_TAG = "v1-combos-1";
   const STANDUP_SEED_TAG = "v1-standup-1";
   const DEFAULT_STANDUP = { enabled:true, days:[1,2,3,4,5], hour:11, minute:0 };
@@ -511,7 +515,8 @@
     return {
       managers: [
         { id:"mark", name:"Mark", pin:"1234" },
-        { id:"daniel", name:"Daniel Tucker", pin:"1234" }
+        { id:"daniel", name:"Daniel Tucker", pin:"1234" },
+        { id:"lauren", name:"Lauren", pin:"1234" }
       ],
       tasks: SMT_TOP_TASK_NAMES.map(function(name,i){ return mkTask(name, slugify(name)+"-smt"+i); })
         .concat(DEFAULT_TASK_NAMES.map(function(name,i){ return mkTask(name, slugify(name)+"-"+i); })),
@@ -534,6 +539,8 @@
       smtSeedTag: SMT_SEED_TAG,
       comboSeedTag: null,
       ppuSeedTag: null,
+      managersSeedTag: MANAGERS_SEED_TAG,
+      faultBoards: [],
       standup: Object.assign({}, DEFAULT_STANDUP),
       standupSeedTag: STANDUP_SEED_TAG
     };
@@ -641,6 +648,17 @@
       changed = true;
     }
     if (STATE.pin !== undefined) { delete STATE.pin; changed = true; }
+    // Feature: add Lauren as a third manager (allow-listed, read-only like Daniel on the
+    // touch-up parts-per-unit fields — see managerSettingsPanel's isMark check). Seed-
+    // tagged so this runs exactly once against already-deployed state without re-running
+    // any other already-completed seed-tag block above/below.
+    if (STATE.managersSeedTag !== MANAGERS_SEED_TAG) {
+      const hasLauren = (STATE.managers||[]).some(function(m){ return m.id === "lauren"; });
+      if (!hasLauren) STATE.managers.push({ id:"lauren", name:"Lauren", pin:"1234" });
+      STATE.managersSeedTag = MANAGERS_SEED_TAG;
+      changed = true;
+    }
+    if (!STATE.faultBoards) { STATE.faultBoards = []; changed = true; }
     if (STATE.priorityTaskIds !== undefined) { delete STATE.priorityTaskIds; changed = true; }
     if (!STATE.managerNotices) { STATE.managerNotices = []; changed = true; }
     if (STATE.reassignUntil === undefined) { STATE.reassignUntil = null; changed = true; }
@@ -972,6 +990,28 @@
   function activeWorkers(){ return STATE.workers.filter(function(w){ return w.active; }); }
   function findTask(id){ return STATE.tasks.find(function(t){ return t.id===id; }); }
   function findWorker(id){ return STATE.workers.find(function(w){ return w.id===id; }); }
+
+  /* ---------------- Fault Log traceability (Feature: test-task fault boards) ---------------- */
+  const FAULT_STATUS_LABELS = { for_repair:"For Repair", received:"Received", passed:"Passed", set_aside:"Set Aside" };
+  function faultStatusBadgeClass(status){
+    if (status === "passed") return "good";
+    if (status === "received") return "warn";
+    if (status === "set_aside") return "idle";
+    return "bad"; // for_repair
+  }
+  function findFaultBoardBySerial(serial){
+    const key = (serial||"").trim();
+    if (!key) return null;
+    return (STATE.faultBoards||[]).find(function(b){ return b.serial === key; }) || null;
+  }
+  function faultBoardHistoryHtml(board){
+    const rows = (board.history||[]).slice().reverse().map(function(h){
+      return '<div class="list-row"><div><div>'+escapeHtml(FAULT_STATUS_LABELS[h.status]||h.status)+
+        (h.desc?(' — '+escapeHtml(h.desc)):'')+(h.job?(' · Job '+escapeHtml(h.job)):'')+'</div>'+
+        '<div style="font-size:12px;color:var(--muted);">'+escapeHtml(h.entryDate||"")+' · '+escapeHtml(h.by||"")+'</div></div></div>';
+    }).join("");
+    return '<div style="text-align:left;margin-top:10px;"><div class="section-title" style="margin:10px 0 4px;">History</div>'+rows+'</div>';
+  }
   function validateSerialFormat(raw){
     const fmt = STATE.serialFormat || DEFAULT_SERIAL_FORMAT;
     if (!/^[0-9]+$/.test(raw)) return "Wrong format — digits only.";
@@ -1407,6 +1447,8 @@
       case "enterFaults": return kioskShell(enterFaultsBody());
       case "scanPrompt": return kioskShell(scanPromptBody());
       case "scanSerials": return kioskShell(scanSerialsBody());
+      case "logFaultBoard": return kioskShell(logFaultBoardBody());
+      case "retestBoard": return kioskShell(retestBoardBody());
       case "askAnother": return kioskShell(askAnotherBody());
       default: return kioskShell(confirmOwnerBody(assignedId));
     }
@@ -1445,6 +1487,7 @@
       '<div class="kiosk-body">'+
         '<button class="btn btn-primary" onclick="App.goto(\'pickTask\')">Yes, that’s me</button>'+
         '<button class="btn btn-ghost" onclick="App.changeOwner()">Not me — change worker</button>'+
+        '<button class="link-btn" onclick="App.goto(\'retestBoard\')">Retest a board</button>'+
       '</div>'
     );
   }
@@ -1600,6 +1643,124 @@
       '</div>'
     );
   }
+  // Feature: Fault Log traceability — per-board date picker used while logging a new
+  // fault board, independent of the batch's own entryDateBlock() (a faulty unit found
+  // today may correspond to a unit made on an earlier date).
+  function fbDateBlock(){
+    const chosen = ui.fbDate || ui.entryDate || todayDateOnly();
+    const chosenD = parseDateBasis(chosen);
+    const dateLabel = fmtDateShort(chosenD)+" "+chosenD.getFullYear();
+    if (!ui.fbDateEditing) {
+      return (
+        '<div class="kiosk-sub" style="margin-bottom:2px;">Board date: <b>'+dateLabel+'</b></div>'+
+        '<button type="button" class="link-btn" style="margin-top:0;" onclick="App.toggleFbDateEdit(true)">This board was made on a different date</button>'
+      );
+    }
+    const minStr = dateOnlyStr((function(){ const d = new Date(); d.setDate(d.getDate()-60); return d; })());
+    const maxStr = todayDateOnly();
+    return (
+      '<div class="kiosk-sub" style="margin-bottom:2px;">Board date: <b>'+dateLabel+'</b></div>'+
+      '<div class="field" style="text-align:left;">'+
+        '<label>Board date (up to 60 days back, not in the future)</label>'+
+        '<input type="date" id="fbDateInput" value="'+chosen+'" min="'+minStr+'" max="'+maxStr+'" onchange="App.setFbDate(this.value)" style="padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px;">'+
+      '</div>'+
+      '<button type="button" class="link-btn" style="margin-top:0;" onclick="App.toggleFbDateEdit(false)">Use today’s date instead</button>'
+    );
+  }
+  function logFaultBoardBody(){
+    const idx = ui.faultBoardIndex || 0;
+    const count = ui.faultBoardCount || 0;
+    const task = findTask(ui.faultBoardTaskId);
+    return (
+      '<div class="task-name-tag">'+escapeHtml(task?task.name:"Test task")+'</div>'+
+      '<div class="kiosk-title" style="margin-top:12px;">Log faulty board '+(idx+1)+' of '+count+'</div>'+
+      '<div class="kiosk-sub">Scan or type the faulty board’s serial number, then describe the fault. It doesn’t need to already be in the serial records.</div>'+
+      '<div class="kiosk-body">'+
+        '<button class="btn btn-ghost" onclick="App.openCameraForFaultBoard()">📷 Scan with camera</button>'+
+        '<input class="big" type="text" id="fbSerialInput" data-autofocus="1" placeholder="Serial number">'+
+        '<div class="field" style="text-align:left;"><label>Fault description</label><input class="big" type="text" id="fbDescInput" placeholder="e.g. No power on / dead board"></div>'+
+        '<div class="field" style="text-align:left;"><label>Job number</label><input class="big" type="text" id="fbJobInput" placeholder="Job number"></div>'+
+        fbDateBlock()+
+        '<button class="btn btn-primary" onclick="App.logFaultBoardNext()">'+((idx+1)>=count?"Log & Finish":"Log & Continue")+'</button>'+
+        '<button class="link-btn" onclick="App.cancelFaultBoardLogging()">Cancel and go back</button>'+
+      '</div>'
+    );
+  }
+  // Feature: Fault Log traceability — worker-facing date picker used when logging a
+  // "Faulty Again" occurrence during a retest, independent of other date pickers.
+  function rtDateBlock(){
+    const chosen = ui.rtDate || todayDateOnly();
+    const chosenD = parseDateBasis(chosen);
+    const dateLabel = fmtDateShort(chosenD)+" "+chosenD.getFullYear();
+    if (!ui.rtDateEditing) {
+      return (
+        '<div class="kiosk-sub" style="margin-bottom:2px;">Date: <b>'+dateLabel+'</b></div>'+
+        '<button type="button" class="link-btn" style="margin-top:0;" onclick="App.toggleRtDateEdit(true)">This was found on a different date</button>'
+      );
+    }
+    const minStr = dateOnlyStr((function(){ const d = new Date(); d.setDate(d.getDate()-60); return d; })());
+    const maxStr = todayDateOnly();
+    return (
+      '<div class="kiosk-sub" style="margin-bottom:2px;">Date: <b>'+dateLabel+'</b></div>'+
+      '<div class="field" style="text-align:left;">'+
+        '<label>Date (up to 60 days back, not in the future)</label>'+
+        '<input type="date" id="rtDateInput" value="'+chosen+'" min="'+minStr+'" max="'+maxStr+'" onchange="App.setRtDate(this.value)" style="padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px;">'+
+      '</div>'+
+      '<button type="button" class="link-btn" style="margin-top:0;" onclick="App.toggleRtDateEdit(false)">Use today’s date instead</button>'
+    );
+  }
+  function retestFaultyAgainFormHtml(last){
+    return (
+      '<div class="field" style="text-align:left;"><label>Fault description</label><input class="big" type="text" id="rtDescInput" value="'+escapeHtml(last.desc||"")+'" placeholder="Fault description"></div>'+
+      '<div class="field" style="text-align:left;"><label>Job number</label><input class="big" type="text" id="rtJobInput" value="'+escapeHtml(last.job||"")+'" placeholder="Job number"></div>'+
+      rtDateBlock()+
+      '<div class="btn-row">'+
+        '<button class="btn btn-ghost" onclick="App.retestFaultyAgainCancel()">Cancel</button>'+
+        '<button class="btn btn-primary" onclick="App.retestFaultyAgainSubmit()">Confirm Faulty Again</button>'+
+      '</div>'
+    );
+  }
+  // Feature: Fault Log traceability — dedicated worker screen for retesting a board that
+  // came back from repair ("Received"). Looks the serial up in STATE.faultBoards and only
+  // offers Passed / Faulty Again when it's actually awaiting retest; otherwise explains why.
+  function retestBoardBody(){
+    const board = ui.rtBoardId ? (STATE.faultBoards||[]).find(function(b){ return b.id===ui.rtBoardId; }) : null;
+    let resultHtml = "";
+    if (ui.rtLookupDone) {
+      if (!board) {
+        resultHtml = '<div class="kiosk-sub" style="color:var(--bad);">No fault board found with that serial number.</div>';
+      } else if (board.status !== "received") {
+        resultHtml = '<div class="kiosk-sub" style="color:var(--warn);">This board isn’t currently awaiting retest — its status is <b>'+escapeHtml(FAULT_STATUS_LABELS[board.status]||board.status)+'</b>.</div>'+
+          faultBoardHistoryHtml(board);
+      } else {
+        const last = board.history[board.history.length-1] || {};
+        resultHtml =
+          '<div class="confirm-summary" style="text-align:left;">'+
+            '<div><span>Serial</span><b>'+escapeHtml(board.serial)+'</b></div>'+
+            '<div><span>Last fault</span><b>'+escapeHtml(last.desc||"—")+'</b></div>'+
+            '<div><span>Job number</span><b>'+escapeHtml(last.job||"—")+'</b></div>'+
+          '</div>'+
+          (ui.rtFaultyAgain ? retestFaultyAgainFormHtml(last) :
+            '<div class="btn-row">'+
+              '<button class="btn btn-primary" onclick="App.retestPassed()">Passed</button>'+
+              '<button class="btn btn-danger" onclick="App.retestFaultyAgainStart()">Faulty Again</button>'+
+            '</div>'
+          );
+      }
+    }
+    return (
+      '<div class="kiosk-eyebrow">Retest a board</div>'+
+      '<div class="kiosk-title">Scan or type the board’s serial number</div>'+
+      '<div class="kiosk-sub">Looks up boards currently marked “Received” for retest.</div>'+
+      '<div class="kiosk-body">'+
+        '<button class="btn btn-ghost" onclick="App.openCameraForRetestScan()">📷 Scan with camera</button>'+
+        '<input class="big" type="text" id="rtSerialInput" data-autofocus="1" value="'+escapeHtml(ui.rtSerial||"")+'" placeholder="Serial number" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.retestLookup();}">'+
+        '<button class="btn btn-ghost" onclick="App.retestLookup()">Look Up</button>'+
+        resultHtml+
+        '<button class="link-btn" onclick="App.retestBack()">Back</button>'+
+      '</div>'
+    );
+  }
   function askAnotherBody(){
     const label = taskLabelForUi();
     let eyebrow = "Saved ✅", headline = "Logged for "+escapeHtml(ui.resolvedName || label), note = "";
@@ -1642,6 +1803,8 @@
     else if (screen === "assigner") body = managerAssignerPanel();
     else if (screen === "summary") body = managerSummaryPanel();
     else if (screen === "entries") body = managerEntriesPanel();
+    else if (screen === "about") body = managerAboutPanel();
+    else if (screen === "faultlog") body = managerFaultLogPanel();
     else body = managerDashboardBody();
 
     let modal = "";
@@ -2052,6 +2215,8 @@
           '<button onclick="App.gotoManager(\'tasks\')">Manage Tasks</button>'+
           '<button onclick="App.gotoManager(\'workers\')">Manage Workers</button>'+
           '<button onclick="App.gotoManager(\'settings\')">Settings</button>'+
+          '<button onclick="App.gotoManager(\'faultlog\')">Fault Log</button>'+
+          '<button onclick="App.gotoManager(\'about\')">About</button>'+
           '<button onclick="App.openModal(\'reassign\')">🔓 Open Reassignment Window</button>'+
           '<span style="display:inline-flex;gap:6px;align-items:center;">'+
             '<select id="downloadWeekSelect" onchange="App.setDownloadWeek(this.value)" style="padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:13px;">'+dlWeekOptsHtml+'</select>'+
@@ -2167,18 +2332,20 @@
     const identity = getMgrIdentity();
     const isMark = identity === "mark";
     const me = (STATE.managers||[]).find(function(m){ return m.id===identity; });
-    const other = (STATE.managers||[]).find(function(m){ return m.id!==identity; });
+    // Generalized for any number of managers (Feature: Lauren as a 3rd manager) — every
+    // OTHER manager gets their own reset-to-default row, not just a single hardcoded one.
+    const others = (STATE.managers||[]).filter(function(m){ return m.id!==identity; });
 
     let pinSection = '<div class="field"><label>Your PIN ('+escapeHtml(me?me.name:"you")+')</label>'+
       '<div style="display:flex;gap:10px;"><input type="text" inputmode="numeric" id="newPin" placeholder="Enter new PIN" style="flex:1;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
       '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.savePin()">Save</button></div>'+
     '</div>';
-    if (other) {
+    others.forEach(function(other){
       pinSection += '<div class="field"><label>'+escapeHtml(other.name)+'’s PIN</label>'+
         '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><span style="color:var(--muted);font-size:13px;">Locked out? Reset it back to the default.</span>'+
         '<button class="chip-btn" onclick="App.resetOtherPin(\''+other.id+'\')">Reset to 1234</button></div>'+
       '</div>';
-    }
+    });
 
     const touchupTasks = THROUGHHOLE_YIELD_NAMES.map(function(name){
       return STATE.tasks.find(function(t){ return t.name.trim().toLowerCase() === name.trim().toLowerCase(); });
@@ -2216,6 +2383,67 @@
         '</div>'+
         standupScheduleSection()+
         '<div style="color:var(--muted);font-size:13px;">History is kept forever — the dashboard only changes which week or year it is summarizing.</div>'+
+      '</div>'
+    );
+  }
+  function managerAboutPanel(){
+    const builtD = new Date();
+    const builtLabel = fmtDateShort(builtD)+" "+builtD.getFullYear();
+    return (
+      '<div class="card panel" style="text-align:center;max-width:520px;margin-left:auto;margin-right:auto;">'+
+        '<div class="panel-head" style="justify-content:center;position:relative;">'+
+          '<h3>Shift Floor</h3>'+
+          '<button class="link-btn" style="margin:0;position:absolute;right:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button>'+
+        '</div>'+
+        '<p style="color:var(--ink);font-size:15px;line-height:1.55;text-align:left;">Shift Floor is a live task check-in and manager dashboard system for the MTData manufacturing floor — workers log task completions and quantities in real time, and managers monitor yield, fault rates, and task assignments across the shift.</p>'+
+        '<div style="color:var(--muted);font-size:13px;margin-bottom:18px;">Built '+builtLabel+'</div>'+
+        '<img src="data:image/png;base64,'+ABOUT_QR_B64+'" alt="Shift Floor QR code" style="width:180px;height:180px;border-radius:10px;border:1px solid var(--line);background:#fff;padding:8px;">'+
+        '<div style="color:var(--muted);font-size:13px;margin-top:8px;">Scan to open Shift Floor on another tablet or phone</div>'+
+        '<div style="color:var(--muted);font-size:13px;margin-top:22px;border-top:1px dashed var(--line);padding-top:14px;">Developed by Mark Granada for MTData Manufacturing Floor Control</div>'+
+      '</div>'
+    );
+  }
+  // Feature: Fault Log traceability — manager-facing panel listing every STATE.faultBoards
+  // record, filterable by status, with the manager-only Mark Received / Set Aside actions.
+  function managerFaultLogPanel(){
+    const filter = ui.faultLogFilter || "all";
+    const boards = (STATE.faultBoards||[]).slice().sort(function(a,b){ return new Date(b.createdAt||0) - new Date(a.createdAt||0); });
+    const filtered = filter==="all" ? boards : boards.filter(function(b){ return b.status===filter; });
+    const tabDefs = [["all","All"],["for_repair","For Repair"],["received","Received"],["passed","Passed"],["set_aside","Set Aside"]];
+    const tabs = tabDefs.map(function(f){
+      return '<button class="chip-btn'+(filter===f[0]?' chip-active':'')+'" onclick="App.setFaultLogFilter(\''+f[0]+'\')">'+f[1]+'</button>';
+    }).join(" ");
+    const rows = filtered.map(function(b){
+      const task = findTask(b.taskId);
+      const last = b.history[b.history.length-1] || {};
+      const expanded = !!(ui.faultLogExpanded && ui.faultLogExpanded[b.id]);
+      const badgeClass = faultStatusBadgeClass(b.status);
+      let actions = '<button class="chip-btn" onclick="App.toggleFaultLogExpand(\''+b.id+'\')">'+(expanded?"Hide":"View")+' History</button>';
+      if (b.status === "for_repair") {
+        actions += '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.markFaultBoardReceived(\''+b.id+'\')">Mark Received</button>';
+      }
+      if (b.status !== "set_aside") {
+        actions += '<button class="chip-btn danger" onclick="App.setAsideFaultBoard(\''+b.id+'\')">Set Aside</button>';
+      } else {
+        actions += '<button class="chip-btn" onclick="App.undoSetAsideFaultBoard(\''+b.id+'\')">Undo Set Aside</button>';
+      }
+      return (
+        '<div class="card" style="padding:14px 16px;margin-bottom:10px;">'+
+          '<div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:baseline;">'+
+            '<div><b class="num">'+escapeHtml(b.serial)+'</b> · '+escapeHtml(task?task.name:"(unknown task)")+'</div>'+
+            '<span class="badge '+badgeClass+'">'+escapeHtml(FAULT_STATUS_LABELS[b.status]||b.status)+'</span>'+
+          '</div>'+
+          '<div style="font-size:13px;color:var(--muted);margin-top:6px;">'+escapeHtml(last.desc||"—")+(last.job?(' · Job '+escapeHtml(last.job)):"")+(last.entryDate?(' · '+escapeHtml(last.entryDate)):"")+'</div>'+
+          (expanded ? faultBoardHistoryHtml(b) : "")+
+          '<div class="list-row" style="border:none;padding:10px 0 0;"><div></div><div class="actions">'+actions+'</div></div>'+
+        '</div>'
+      );
+    }).join("");
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Fault Log</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">'+tabs+'</div>'+
+        (rows || '<div style="color:var(--muted);font-size:14px;">No fault boards logged'+(filter!=="all"?(" with status \""+(FAULT_STATUS_LABELS[filter]||filter)+"\""):"")+'.</div>')+
       '</div>'
     );
   }
@@ -2470,7 +2698,7 @@
       const workerId = getAssignedWorkerId();
       const made = ui.made;
       let faults;
-      if (ui.screen === "scanSerials" || ui.screen === "scanPrompt") {
+      if (ui.screen === "scanSerials" || ui.screen === "scanPrompt" || ui.screen === "logFaultBoard") {
         faults = ui.faults;
       } else {
         const input = document.getElementById("faultsInput");
@@ -2478,16 +2706,37 @@
       }
       const entryDate = ui.entryDate || todayDateOnly();
 
+      // Feature: Fault Log traceability — for TEST_YIELD_NAMES tasks with faults>0, collect
+      // a serial/description/job/date for each faulty unit BEFORE finishing this entry.
+      // Skipped once faultBoardStage is "done" (i.e. we're re-entering here right after
+      // logFaultBoardNext() finished collecting the batch).
+      if (faults > 0 && ui.faultBoardStage !== "done") {
+        let resolvedTaskId = ui.taskId;
+        if (ui.taskId === "__other__") {
+          const otherLabel = (ui.otherLabel||"").trim();
+          const match = findTaskByNameOrAlias(otherLabel);
+          resolvedTaskId = match ? match.id : null;
+        }
+        if (resolvedTaskId && resolveNamesToIds(TEST_YIELD_NAMES).indexOf(resolvedTaskId) > -1) {
+          setUi({
+            screen:"logFaultBoard", faults:faults, faultBoardStage:"collecting", faultBoardCount:faults,
+            faultBoardIndex:0, faultBoardQueue:[], faultBoardTaskId:resolvedTaskId,
+            fbDate:null, fbDateEditing:false
+          });
+          return;
+        }
+      }
+
       if (ui.taskId === "__other__") {
         const label = (ui.otherLabel||"").trim();
         const match = findTaskByNameOrAlias(label);
         if (match) {
           addEntry(workerId, match.id, made, faults, "worker", { entryDate:entryDate, successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
-          setUi({ screen:"askAnother", faults:faults, resolvedName:match.name, pendingReview:false, serialsCount:null });
+          setUi({ screen:"askAnother", faults:faults, resolvedName:match.name, pendingReview:false, serialsCount:null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
         } else {
           STATE.pendingRequests.push({ id:uid("p"), workerId:workerId, label:label, made:made, faults:faults, ts:new Date().toISOString(), entryDate:entryDate, status:"pending" });
           persist(false, "Sent to the manager for review ✅", "Not sent yet — retrying…");
-          setUi({ screen:"askAnother", faults:faults, pendingReview:true, resolvedName:null, serialsCount:null });
+          setUi({ screen:"askAnother", faults:faults, pendingReview:true, resolvedName:null, serialsCount:null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
         }
       } else {
         // Feature 3: only require/attach the scanned serials when we're actually coming
@@ -2508,8 +2757,175 @@
             STATE.serials.push({ id:uid("s"), serial:s, taskId:ui.taskId, workerId:workerId, entryId:entry.id, ts:ts, entryDate:entryDate });
           });
         }
-        setUi({ screen:"askAnother", faults:faults, resolvedName:null, pendingReview:false, serialsList:null, serialsCount: serialsToSave ? serialsToSave.length : null });
+        setUi({ screen:"askAnother", faults:faults, resolvedName:null, pendingReview:false, serialsList:null, serialsCount: serialsToSave ? serialsToSave.length : null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
       }
+    },
+    // Feature: Fault Log traceability — collects one faulty board's serial/description/
+    // job/date, then either advances to the next board in this batch or (on the last one)
+    // creates the STATE.faultBoards records and re-invokes submitFaults() to finish the
+    // normal made/faults entry (faultBoardStage is "done" by then, so it won't loop back).
+    logFaultBoardNext: function(){
+      const serialEl = document.getElementById("fbSerialInput");
+      const descEl = document.getElementById("fbDescInput");
+      const jobEl = document.getElementById("fbJobInput");
+      const serial = serialEl ? serialEl.value.trim() : "";
+      const desc = descEl ? descEl.value.trim() : "";
+      const job = jobEl ? jobEl.value.trim() : "";
+      if (!serial) { showToast("Enter or scan the serial number."); return; }
+      if (!desc) { showToast("Enter a fault description."); return; }
+      const date = ui.fbDate || ui.entryDate || todayDateOnly();
+      const queue = (ui.faultBoardQueue||[]).slice();
+      queue.push({ serial:serial, desc:desc, job:job, entryDate:date });
+      const nextIndex = (ui.faultBoardIndex||0) + 1;
+      const count = ui.faultBoardCount || 0;
+      if (nextIndex < count) {
+        setUi({ faultBoardQueue:queue, faultBoardIndex:nextIndex, fbDate:null, fbDateEditing:false });
+        return;
+      }
+      const workerId = getAssignedWorkerId();
+      const worker = findWorker(workerId);
+      const byName = worker ? worker.name : "Worker";
+      const taskId = ui.faultBoardTaskId;
+      queue.forEach(function(b){
+        const ts = new Date().toISOString();
+        STATE.faultBoards.push({
+          id: uid("fb"),
+          serial: b.serial,
+          taskId: taskId,
+          status: "for_repair",
+          history: [{ id:uid("fbh"), action:"logged", status:"for_repair", desc:b.desc, job:b.job, entryDate:b.entryDate, ts:ts, by:byName }],
+          createdAt: ts
+        });
+      });
+      setUi({ faultBoardStage:"done", faultBoardQueue:null, fbDate:null, fbDateEditing:false });
+      App.submitFaults();
+    },
+    cancelFaultBoardLogging: function(){
+      setUi({ screen:"enterFaults", faultBoardStage:null, faultBoardQueue:null, faultBoardIndex:0, faultBoardCount:0, faultBoardTaskId:null, fbDate:null, fbDateEditing:false });
+    },
+    setFbDate: function(val){
+      if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return;
+      const minD = new Date(); minD.setHours(0,0,0,0); minD.setDate(minD.getDate()-60);
+      const maxD = new Date(); maxD.setHours(0,0,0,0);
+      const picked = parseDateBasis(val);
+      if (picked < minD || picked > maxD) { showToast("Pick a date within the last 60 days, not in the future."); return; }
+      setUi({ fbDate: val });
+    },
+    toggleFbDateEdit: function(on){ setUi({ fbDateEditing: !!on, fbDate: on ? (ui.fbDate || ui.entryDate || todayDateOnly()) : null }); },
+    // Feature: Fault Log traceability — camera scan for the fault-board-logging screen;
+    // reuses the same camera-scan engine as everywhere else, closing itself after one code.
+    openCameraForFaultBoard: function(){
+      let got = false;
+      openCameraScan({
+        targetCount: 1,
+        getCount: function(){ return got ? 1 : 0; },
+        feed: function(code){
+          const el = document.getElementById("fbSerialInput");
+          if (el) el.value = code;
+          got = true;
+        }
+      });
+    },
+    // Feature: Fault Log traceability — "Retest a board" worker screen actions.
+    retestLookup: function(){
+      const input = document.getElementById("rtSerialInput");
+      const val = input ? input.value.trim() : "";
+      if (!val) { showToast("Enter or scan a serial number."); return; }
+      const board = findFaultBoardBySerial(val);
+      setUi({ rtSerial:val, rtBoardId: board?board.id:null, rtLookupDone:true, rtFaultyAgain:false, rtDate:null, rtDateEditing:false });
+    },
+    openCameraForRetestScan: function(){
+      let got = false;
+      openCameraScan({
+        targetCount: 1,
+        getCount: function(){ return got ? 1 : 0; },
+        feed: function(code){
+          const el = document.getElementById("rtSerialInput");
+          if (el) el.value = code;
+          got = true;
+          App.retestLookup();
+        }
+      });
+    },
+    retestFaultyAgainStart: function(){ setUi({ rtFaultyAgain:true, rtDate:null, rtDateEditing:false }); },
+    retestFaultyAgainCancel: function(){ setUi({ rtFaultyAgain:false }); },
+    setRtDate: function(val){
+      if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return;
+      const minD = new Date(); minD.setHours(0,0,0,0); minD.setDate(minD.getDate()-60);
+      const maxD = new Date(); maxD.setHours(0,0,0,0);
+      const picked = parseDateBasis(val);
+      if (picked < minD || picked > maxD) { showToast("Pick a date within the last 60 days, not in the future."); return; }
+      setUi({ rtDate: val });
+    },
+    toggleRtDateEdit: function(on){ setUi({ rtDateEditing: !!on, rtDate: on ? (ui.rtDate || todayDateOnly()) : null }); },
+    retestPassed: function(){
+      const board = ui.rtBoardId ? (STATE.faultBoards||[]).find(function(b){ return b.id===ui.rtBoardId; }) : null;
+      if (!board || board.status !== "received") { showToast("This board is no longer awaiting retest."); return; }
+      const workerId = getAssignedWorkerId();
+      const worker = findWorker(workerId);
+      board.status = "passed";
+      board.history.push({ id:uid("fbh"), action:"passed", status:"passed", entryDate:todayDateOnly(), ts:new Date().toISOString(), by: worker?worker.name:"Worker" });
+      persist(false, "Board "+board.serial+" marked Passed ✅", "Saved locally — will sync.");
+      setUi({ rtSerial:null, rtBoardId:null, rtLookupDone:false, rtFaultyAgain:false });
+    },
+    retestFaultyAgainSubmit: function(){
+      const board = ui.rtBoardId ? (STATE.faultBoards||[]).find(function(b){ return b.id===ui.rtBoardId; }) : null;
+      if (!board || board.status !== "received") { showToast("This board is no longer awaiting retest."); return; }
+      const descEl = document.getElementById("rtDescInput");
+      const jobEl = document.getElementById("rtJobInput");
+      const desc = descEl ? descEl.value.trim() : "";
+      const job = jobEl ? jobEl.value.trim() : "";
+      if (!desc) { showToast("Enter a fault description."); return; }
+      const date = ui.rtDate || todayDateOnly();
+      const workerId = getAssignedWorkerId();
+      const worker = findWorker(workerId);
+      board.status = "for_repair";
+      board.history.push({ id:uid("fbh"), action:"faulty_again", status:"for_repair", desc:desc, job:job, entryDate:date, ts:new Date().toISOString(), by: worker?worker.name:"Worker" });
+      persist(false, "Board "+board.serial+" logged as Faulty Again.", "Saved locally — will sync.");
+      setUi({ rtSerial:null, rtBoardId:null, rtLookupDone:false, rtFaultyAgain:false, rtDate:null, rtDateEditing:false });
+    },
+    retestBack: function(){ setUi({ screen:"confirmOwner", rtSerial:null, rtBoardId:null, rtLookupDone:false, rtFaultyAgain:false, rtDate:null, rtDateEditing:false }); },
+    // Feature: Fault Log traceability — manager Fault Log panel actions.
+    setFaultLogFilter: function(f){ setUi({ faultLogFilter:f }); },
+    toggleFaultLogExpand: function(id){
+      const map = Object.assign({}, ui.faultLogExpanded||{});
+      map[id] = !map[id];
+      setUi({ faultLogExpanded: map });
+    },
+    markFaultBoardReceived: function(id){
+      const b = (STATE.faultBoards||[]).find(function(x){ return x.id===id; });
+      if (!b || b.status !== "for_repair") { showToast("Board is not currently For Repair."); return; }
+      const identity = getMgrIdentity();
+      const mgr = (STATE.managers||[]).find(function(m){ return m.id===identity; });
+      b.status = "received";
+      b.history.push({ id:uid("fbh"), action:"received", status:"received", entryDate:todayDateOnly(), ts:new Date().toISOString(), by: mgr?mgr.name:identity });
+      persist(false, "Board marked Received.", "Saved locally — will sync.");
+      render();
+    },
+    setAsideFaultBoard: function(id){
+      const b = (STATE.faultBoards||[]).find(function(x){ return x.id===id; });
+      if (!b || b.status === "set_aside") return;
+      const identity = getMgrIdentity();
+      const mgr = (STATE.managers||[]).find(function(m){ return m.id===identity; });
+      b.history.push({ id:uid("fbh"), action:"set_aside", status:"set_aside", entryDate:todayDateOnly(), ts:new Date().toISOString(), by: mgr?mgr.name:identity });
+      b.status = "set_aside";
+      persist(false, "Board set aside.", "Saved locally — will sync.");
+      render();
+    },
+    undoSetAsideFaultBoard: function(id){
+      const b = (STATE.faultBoards||[]).find(function(x){ return x.id===id; });
+      if (!b || b.status !== "set_aside") return;
+      // Restore to whatever status the last non-"set_aside" history entry left it in.
+      let restore = "for_repair";
+      for (let i=b.history.length-1; i>=0; i--){
+        if (b.history[i].status !== "set_aside") { restore = b.history[i].status; break; }
+      }
+      const identity = getMgrIdentity();
+      const mgr = (STATE.managers||[]).find(function(m){ return m.id===identity; });
+      b.status = restore;
+      b.history.push({ id:uid("fbh"), action:"undo_set_aside", status:restore, entryDate:todayDateOnly(), ts:new Date().toISOString(), by: mgr?mgr.name:identity });
+      persist(false, "Set aside undone — restored to "+(FAULT_STATUS_LABELS[restore]||restore)+".", "Saved locally — will sync.");
+      render();
     },
     setEntryDate: function(val){
       if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return;
@@ -2521,8 +2937,8 @@
     },
     toggleEntryDateEdit: function(on){ setUi({ entryDateEditing: !!on, entryDate: on ? (ui.entryDate || todayDateOnly()) : null }); },
     anotherJob: function(yes){
-      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false });
-      else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false });
+      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
+      else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
     },
     submitPin: function(){
       const input = document.getElementById("pinInput");
