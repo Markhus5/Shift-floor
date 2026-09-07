@@ -477,7 +477,8 @@
     "4625 SAT Modem Board RE-TEST (repair)","7000AI Sub-assembly (sub top)","7000AI Main Assembly",
     "7000AI Sub-assembly (full top)","Orica Box (building)","7000AI PROVISIONING",
     "7000 Battery preparation","SOM","Tablet","7000AI Access plate and side bracket install",
-    "Camera (bracket)","4705 SAT Modem case","CanBUS to truck kit","4705 assembly"
+    "Camera (bracket)","4705 SAT Modem case","CanBUS to truck kit","4705 assembly",
+    "7000AI Final Assy"
   ];
   const SEED_TAG = "v2-tasklist-1";
   const DEFAULT_WORKER_NAMES = ["Mark(test)","Rocky","Hen","Phung","Bao","Dennis","Geraldine","Kim"];
@@ -513,6 +514,11 @@
   const ABOUT_QR_B64 = "iVBORw0KGgoAAAANSUhEUgAAAQgAAAEIAQAAAACLjVdSAAABkUlEQVR4nO1YQW7EMBCCKv//Mj0MY3ulSj11FtWbSImTcCAjbPBQ+OX4+g3wQfxjBNQCUY0lqJ78OYXpDOKB/527BjXotylM5+rhWoiiSAjwBQpiOo6gWDOF1M+IGR5vRTx76FlCCGdBUpgO1sN/T4GCyHrUJI8UxOkvr2d/TmE6po81Nyj6juNtCtM5fQgdOWS5SOoPl+mjMhjk2zF/uiopTMcQ6uSFmi+WhlDGG8R0APE4d1EgAZGQlxG/TmE6g+BOo75QdADhhfm0klf9ftWgZLETewrTMQTrrEkiSCSIKs0kjwgE18aNDut8jasxTAf1ARGUQLsvyC2QIKYDiAoZHT06mXUYgS7MHxRBvegDAEDd6i82FW/0O5nZdVOYDq6n6l6QI0fnsVv14WEbjJbt3Jc/nqUG1fZF9l5WRzWH6Vg9Vied6p3MDiE5TOfqsfrrbgntRfW+9eNAUOCSibzORjL9Q8TRX7fteqg7/fbor3vRcJcdbTUpTOfqYYOhM1k9yIkkhul4/ngrjw8iE/ENFL7bvb84SNoAAAAASUVORK5CYII=";
   const COMBO_SEED_TAG = "v1-combos-1";
   const STANDUP_SEED_TAG = "v1-standup-1";
+  // One-time recovery for the 2026-09-07 data-loss incident (stale offline-cache
+  // snapshot overwrote live Firestore data) — see migrateState() below. Only ever
+  // relevant to the already-live production state; a brand-new install has this tag
+  // pre-set in buildDefaultState() so it never runs there.
+  const RECOVERY_SEED_TAG = "v1-csv-recovery-2026-09-07-1";
   const DEFAULT_STANDUP = { enabled:true, days:[1,2,3,4,5], hour:11, minute:0 };
 
   function buildDefaultState(){
@@ -549,7 +555,8 @@
       managersSeedTag: MANAGERS_SEED_TAG,
       faultBoards: [],
       standup: Object.assign({}, DEFAULT_STANDUP),
-      standupSeedTag: STANDUP_SEED_TAG
+      standupSeedTag: STANDUP_SEED_TAG,
+      recoverySeedTag: RECOVERY_SEED_TAG
     };
   }
 
@@ -716,30 +723,33 @@
       if (headline) { STATE.headlineTaskId = headline.id; changed = true; }
     }
     if (!STATE.serials) { STATE.serials = []; changed = true; }
-    if (!STATE.serialTaskId || !findTask(STATE.serialTaskId)) {
-      const serialTask = STATE.tasks.find(function(t){ return t.name.trim().toLowerCase() === "7000ai provisioning"; });
-      if (serialTask) { STATE.serialTaskId = serialTask.id; changed = true; }
-    }
     // Feature 4 (weekly pending-serials tracking): every serial row needs a date-only
     // entryDate it's attributed to, same idea as entries' entryDate. Backfill any row
     // created before this feature existed from its ts.
     STATE.serials.forEach(function(s){
       if (!s.entryDate) { s.entryDate = dateOnlyStr(s.ts || Date.now()); changed = true; }
     });
-    // Feature 1: retarget serial scanning at "7000AI Final Assy" once it's found by name.
-    // This task lives only in live Firestore data (not this file's default seed list), so
-    // it may not have synced down yet on a given client/load. Only mark this tag done once
-    // the lookup actually succeeds — if not found yet, leave serialTaskId as-is (still
-    // whatever the block above resolved it to) and let the next migrateState() call (next
-    // reload, or next Firestore snapshot) retry, without re-running any other already-
-    // completed seed-tag block above.
+    // Feature 1 (serial scanning task): "7000AI Final Assy" is the permanent home for
+    // serial scanning, and its own default task now (bottom of DEFAULT_TASK_NAMES) — but
+    // this check deliberately does NOT gate on a one-time seed tag. It runs on every
+    // migrateState() call, so if this task (or the serialTaskId pointer to it) is ever
+    // wiped again by a future sync/data-loss incident, it keeps fixing itself on the next
+    // load instead of needing another manual rebuild. Task data itself (made/faults
+    // history) is never reconstructed here — only the task's existence and its wiring as
+    // the serial-scan target.
+    let finalAssyTask = findTaskByNameOrAlias(FINAL_ASSY_TASK_NAME);
+    if (!finalAssyTask) {
+      finalAssyTask = { id: slugify(FINAL_ASSY_TASK_NAME)+"-final-assy", name: FINAL_ASSY_TASK_NAME, active:true, aliases:[] };
+      STATE.tasks.push(finalAssyTask);
+      changed = true;
+    }
+    if (STATE.serialTaskId !== finalAssyTask.id) {
+      STATE.serialTaskId = finalAssyTask.id;
+      changed = true;
+    }
     if (STATE.finalAssySeedTag !== FINAL_ASSY_SEED_TAG) {
-      const finalAssyTask = findTaskByNameOrAlias(FINAL_ASSY_TASK_NAME);
-      if (finalAssyTask) {
-        STATE.serialTaskId = finalAssyTask.id;
-        STATE.finalAssySeedTag = FINAL_ASSY_SEED_TAG;
-        changed = true;
-      }
+      STATE.finalAssySeedTag = FINAL_ASSY_SEED_TAG;
+      changed = true;
     }
     if (!STATE.serialFormat || !STATE.serialFormat.totalLength || !STATE.serialFormat.prefixes) {
       STATE.serialFormat = Object.assign({}, DEFAULT_SERIAL_FORMAT);
@@ -788,6 +798,78 @@
     if (typeof STATE.standup.hour !== "number") { STATE.standup.hour = DEFAULT_STANDUP.hour; changed = true; }
     if (typeof STATE.standup.minute !== "number") { STATE.standup.minute = DEFAULT_STANDUP.minute; changed = true; }
     if (typeof STATE.standup.enabled !== "boolean") { STATE.standup.enabled = DEFAULT_STANDUP.enabled; changed = true; }
+
+    // One-time recovery (2026-09-07 data-loss incident): a device's stale offline
+    // Firestore cache got treated as confirmed state and auto-saved over the real,
+    // newer data on the server (fixed in the subscribe/fromCache handling above, but
+    // that fix can't bring back what was already overwritten). This reconstructs the
+    // lost TOTALS — not the original per-submission entries, which are gone for good —
+    // from a Shift Floor Monthly Summary CSV the user exported before the incident
+    // (covering Sep 2026 through 2026-09-07). For each worker+task pair below, it tops
+    // up whatever survived the incident to match the CSV's recorded total, via a single
+    // "recovered" catch-up entry sized to the shortfall — so anything that DID survive
+    // is never double-counted. Retries on every load (like FINAL_ASSY_SEED_TAG above)
+    // until every row can be resolved, in case a device runs this before its local task/
+    // worker lists have synced down.
+    if (STATE.recoverySeedTag !== RECOVERY_SEED_TAG) {
+      const RECOVERY_MONTH = "2026-09";
+      const RECOVERY_DATE = "2026-09-07";
+      const RECOVERY_ROWS = [
+        ["Rocky", "7020-03+01 CAM BOT (SMT)", 248, 0],
+        ["Rocky", "7020-03+01 CAM TOP (SMT)", 373, 0],
+        ["Hen", "7000-03+01 Main board TOUCH-UP", 74, 693],
+        ["Hen", "7010-03+01 Power board TOUCH-UP", 25, 0],
+        ["Dennis", "7000AI PROVISIONING", 28, 9],
+        // Kim / 7000AI Final Assy intentionally excluded — that task and its serial data
+        // were lost entirely; the user is re-entering those manually rather than having
+        // this auto-inject a catch-up total for it.
+        ["Bao", "7010-03+01 Power board TEST", 25, 0],
+        ["Bao", "7000-03+01 Main board TEST", 54, 1],
+        ["Bao", "7020-03+01 Camera board TEST", 24, 0],
+        ["Phung", "7000-03+01 Mainboard BOT SELECTIVE", 127, 0],
+        ["Phung", "7000-03+01 Mainboard TOP SELECTIVE", 70, 0],
+        ["Phung", "7000-03+01 TOP INSP/REWORK", 50, 0],
+        ["Phung", "7020-03+01 Camera board TOP INSP/REWORK", 168, 0]
+      ];
+      let recoveryAllResolved = true;
+      RECOVERY_ROWS.forEach(function(row){
+        const workerName = row[0], taskName = row[1], targetMade = row[2], targetFaults = row[3];
+        const worker = STATE.workers.find(function(w){ return w.name.trim().toLowerCase() === workerName.trim().toLowerCase(); });
+        const task = findTaskByNameOrAlias(taskName);
+        if (!worker || !task) { recoveryAllResolved = false; return; }
+        let curMade = 0, curFaults = 0;
+        STATE.entries.forEach(function(e){
+          if (e.workerId === worker.id && e.taskId === task.id && monthKeyOf(e.entryDate) === RECOVERY_MONTH) {
+            curMade += e.made; curFaults += e.faults;
+          }
+        });
+        const deficitMade = Math.max(0, targetMade - curMade);
+        const deficitFaults = Math.max(0, targetFaults - curFaults);
+        if (deficitMade > 0 || deficitFaults > 0) {
+          STATE.entries.push({
+            id: uid("e"),
+            workerId: worker.id,
+            taskId: task.id,
+            made: deficitMade,
+            faults: deficitFaults,
+            ts: RECOVERY_DATE + "T12:00:00.000Z",
+            entryDate: RECOVERY_DATE,
+            by: worker.id,
+            enteredByManager: null,
+            // Marks this as a synthetic catch-up entry from the CSV recovery rather than
+            // a real submission — available for a future "Recovered from backup" label,
+            // same idea as the existing enteredByManager attribution.
+            recovered: true
+          });
+          changed = true;
+        }
+      });
+      if (recoveryAllResolved) {
+        STATE.recoverySeedTag = RECOVERY_SEED_TAG;
+        changed = true;
+      }
+    }
+
     return changed;
   }
 
