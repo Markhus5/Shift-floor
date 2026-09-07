@@ -340,14 +340,21 @@
         // cb(stateObjOrNull) — called once with current data (or null if no doc yet exists),
         // then again on every remote change.
         subscribe: function(cb){
+          // Second arg to cb: fromCache — true when this snapshot came from the device's
+          // local offline cache rather than a confirmed read from the real Firestore server.
+          // A from-cache read can be STALE (older than what's really on the server), so the
+          // app must never auto-save (persist) anything derived from one — see stateConfirmed/
+          // maybePersistMigration handling in the main script. Showing/using it is fine;
+          // silently writing it back is not.
           return onSnapshot(stateRef, function(snap){
-            if (!snap.exists()) { cb(null); return; }
+            const fromCache = !!(snap.metadata && snap.metadata.fromCache);
+            if (!snap.exists()) { cb(null, fromCache); return; }
             const data = snap.data();
             try {
-              cb(data && data.state ? JSON.parse(data.state) : data);
+              cb(data && data.state ? JSON.parse(data.state) : data, fromCache);
             } catch(e){
               console.error("Shift Floor: failed to parse remote state", e);
-              cb(null);
+              cb(null, fromCache);
             }
           }, function(err){
             console.error("Shift Floor: onSnapshot error", err);
@@ -917,7 +924,17 @@
       return;
     }
 
-    dbApi.subscribe(function(remoteState){
+    dbApi.subscribe(function(remoteState, fromCache){
+      // fromCache: true means this snapshot is the device's own local (possibly stale/older)
+      // cached copy, not a confirmed read from the real Firestore server. Showing/using it is
+      // fine (that's the whole point of the offline cache), but auto-saving anything derived
+      // from it is NOT — a stale cached snapshot can be older than what's really on the server,
+      // and blindly writing it back (e.g. after migrateState() "fixes" it) would silently erase
+      // any real data added since that cache was last refreshed. Only maybePersistMigration()
+      // is allowed to auto-save, and only once we've seen a server-confirmed (!fromCache) read.
+      function maybePersistMigration(changed){
+        if (changed && !fromCache) persist(true);
+      }
       if (firstSnapshot) {
         firstSnapshot = false;
         if (remoteState) {
@@ -926,23 +943,28 @@
           stateConfirmed = true;
           saveStatus = "saved";
           render();
-          if (changed) persist(true);
-        } else {
-          // First run: Firestore confirmed the document truly doesn't exist yet —
-          // legitimate brand-new setup. Safe to seed defaults.
-          const changed = migrateState();
+          maybePersistMigration(changed);
+        } else if (!fromCache) {
+          // First run: Firestore's SERVER confirmed the document truly doesn't exist yet —
+          // legitimate brand-new setup. Safe to seed defaults. (A from-cache "doesn't exist"
+          // just means this device has never synced before, NOT that the server is empty —
+          // stay unconfirmed and wait for the real server read instead of seeding/persisting.)
+          migrateState();
           stateConfirmed = true;
           persist(true);
         }
         return;
       }
-      // Live update from another tablet/dashboard.
+      // Live update from another tablet/dashboard (or this device catching up from cache to
+      // the real server state).
       applyingRemote = true;
       STATE = remoteState || STATE;
-      migrateState();
+      const changed = migrateState();
+      stateConfirmed = true;
       saveStatus = "saved";
       render();
       applyingRemote = false;
+      maybePersistMigration(changed);
     });
   }
 
