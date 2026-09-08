@@ -311,7 +311,7 @@
   // ---- Firebase bridge: exposes window.ShiftFloorDB {subscribe(cb), save(stateObj)} ----
   // and window.ShiftFloorDBReady (a Promise) which the main app script awaits before init().
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-  import { initializeFirestore, persistentLocalCache, getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+  import { initializeFirestore, persistentLocalCache, getFirestore, doc, onSnapshot, setDoc, collection, addDoc, getDoc, getDocs, deleteDoc, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
   window.ShiftFloorDBReady = new Promise(function(resolve){
     try {
@@ -335,6 +335,11 @@
         db = getFirestore(app);
       }
       const stateRef = doc(db, "shiftfloor", "state");
+      // Backup system: every successful save also drops a timestamped snapshot into this
+      // separate collection (see persist() in the main script). It never overwrites the
+      // live "state" doc above, so a bad save can always be rolled back to a snapshot from
+      // before it happened via the manager-facing Backups panel.
+      const backupsCol = collection(db, "shiftfloor_backups");
 
       window.ShiftFloorDB = {
         // cb(stateObjOrNull) — called once with current data (or null if no doc yet exists),
@@ -363,6 +368,39 @@
         // save(stateObj) -> Promise
         save: function(stateObj){
           return setDoc(stateRef, { state: JSON.stringify(stateObj), updatedAt: Date.now() });
+        },
+        // backupSnapshot(stateObj) -> Promise: writes a new, independent timestamped copy
+        // of the given state. Fire-and-forget from the main script's perspective — a
+        // failed backup should never block or fail the real save.
+        backupSnapshot: function(stateObj){
+          return addDoc(backupsCol, {
+            state: JSON.stringify(stateObj),
+            createdAt: Date.now(),
+            entryCount: (stateObj && Array.isArray(stateObj.entries)) ? stateObj.entries.length : 0
+          });
+        },
+        // listBackups(max) -> Promise<Array<{id, createdAt, entryCount}>>, newest first.
+        // Metadata only (no full state), so listing is cheap even with many snapshots.
+        listBackups: function(max){
+          return getDocs(query(backupsCol, orderBy("createdAt","desc"), limit(max||500))).then(function(snap){
+            return snap.docs.map(function(d){
+              const data = d.data();
+              return { id: d.id, createdAt: data.createdAt, entryCount: data.entryCount||0 };
+            });
+          });
+        },
+        // getBackupState(id) -> Promise<stateObj|null> — the full parsed state for one
+        // snapshot. Only fetched when a manager actually restores it.
+        getBackupState: function(id){
+          return getDoc(doc(db, "shiftfloor_backups", id)).then(function(snap){
+            if (!snap.exists()) return null;
+            const data = snap.data();
+            try { return data.state ? JSON.parse(data.state) : null; } catch(e){ return null; }
+          });
+        },
+        // deleteBackup(id) -> Promise — used by the retention-thinning sweep below.
+        deleteBackup: function(id){
+          return deleteDoc(doc(db, "shiftfloor_backups", id));
         }
       };
       resolve(window.ShiftFloorDB);
@@ -1051,6 +1089,64 @@
   }
 
   let persistTimer = null, retryTimer = null, retryCount = 0;
+  // Backup system (client-side snapshot-on-save): after every successful save, a copy of
+  // the just-saved state is also dropped into a separate Firestore collection (never the
+  // live "state" doc), so there's always a rollback point from before whatever happens
+  // next. See dbApi.backupSnapshot()/listBackups()/getBackupState()/deleteBackup() in the
+  // Firebase bridge module above, and managerBackupsPanel()/App.restoreBackup() below.
+  let backupsListCache = null;      // null until first loaded this session
+  let backupsListLoading = false;
+  let backupsListError = null;
+  let backupsPrunedThisSession = false;
+  // Retention: keep every snapshot from the last 2 days in full; thin anything older than
+  // that down to one per calendar day, up to 30 days back; delete anything older still.
+  // Runs at most once per browser session (triggered when the Backups panel is opened),
+  // not on every save — thinning a few extra full-granularity snapshots for a while is
+  // harmless, so there's no need to run this on every single submission.
+  function pruneOldBackups(){
+    if (backupsPrunedThisSession || !dbApi || !dbApi.listBackups || !dbApi.deleteBackup) return;
+    backupsPrunedThisSession = true;
+    const FULL_MS = 2*24*3600*1000;
+    const DAILY_CUTOFF_MS = 30*24*3600*1000;
+    const now = Date.now();
+    dbApi.listBackups(1000).then(function(list){
+      const toDelete = [];
+      const keepForDay = {};
+      list.forEach(function(b){
+        const age = now - b.createdAt;
+        if (age <= FULL_MS) return;
+        if (age > DAILY_CUTOFF_MS) { toDelete.push(b.id); return; }
+        const day = dateOnlyStr(b.createdAt);
+        const kept = keepForDay[day];
+        if (!kept || b.createdAt > kept.createdAt) {
+          if (kept) toDelete.push(kept.id);
+          keepForDay[day] = b;
+        } else {
+          toDelete.push(b.id);
+        }
+      });
+      toDelete.forEach(function(id){
+        dbApi.deleteBackup(id).catch(function(e){ console.warn("Shift Floor: failed to prune old backup", id, e); });
+      });
+    }).catch(function(e){ console.warn("Shift Floor: backup pruning skipped (couldn't list backups)", e); });
+  }
+  function loadBackupsList(){
+    if (!dbApi || !dbApi.listBackups) { backupsListError = "Not connected — can't load backups right now."; render(); return; }
+    backupsListLoading = true;
+    backupsListError = null;
+    render();
+    dbApi.listBackups(500).then(function(list){
+      backupsListCache = list;
+      backupsListLoading = false;
+      render();
+      pruneOldBackups();
+    }).catch(function(e){
+      console.error("Shift Floor: failed to load backups list", e);
+      backupsListLoading = false;
+      backupsListError = "Couldn't load backups — check connection and try again.";
+      render();
+    });
+  }
   function scheduleRetry(){
     if (retryCount >= 3) return;
     retryCount++;
@@ -1080,6 +1176,11 @@
         retryCount = 0;
         if (successMsg) showToast(successMsg);
         render();
+        // Fire-and-forget: a failed backup snapshot should never affect the real save's
+        // success/failure or the UI — it's purely an extra safety copy on the side.
+        if (dbApi.backupSnapshot) {
+          dbApi.backupSnapshot(STATE).catch(function(e){ console.warn("Shift Floor: backup snapshot failed", e); });
+        }
       } catch(err){
         saveStatus = "offline";
         if (failMsg) showToast(failMsg);
@@ -1909,6 +2010,7 @@
     else if (screen === "entries") body = managerEntriesPanel();
     else if (screen === "about") body = managerAboutPanel();
     else if (screen === "faultlog") body = managerFaultLogPanel();
+    else if (screen === "backups") body = managerBackupsPanel();
     else body = managerDashboardBody();
 
     let modal = "";
@@ -2320,6 +2422,7 @@
           '<button onclick="App.gotoManager(\'workers\')">Manage Workers</button>'+
           '<button onclick="App.gotoManager(\'settings\')">Settings</button>'+
           '<button onclick="App.gotoManager(\'faultlog\')">Fault Log</button>'+
+          '<button onclick="App.gotoManager(\'backups\')">Backups</button>'+
           '<button onclick="App.gotoManager(\'about\')">About</button>'+
           '<button onclick="App.openModal(\'reassign\')">🔓 Open Reassignment Window</button>'+
           '<span style="display:inline-flex;gap:6px;align-items:center;">'+
@@ -2548,6 +2651,32 @@
         '<div class="panel-head"><h3>Fault Log</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
         '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">'+tabs+'</div>'+
         (rows || '<div style="color:var(--muted);font-size:14px;">No fault boards logged'+(filter!=="all"?(" with status \""+(FAULT_STATUS_LABELS[filter]||filter)+"\""):"")+'.</div>')+
+      '</div>'
+    );
+  }
+  // Backup system — manager-facing panel listing recent client-side, snapshot-on-save
+  // backups (see persist()/pruneOldBackups() above), each restorable back to live state.
+  function managerBackupsPanel(){
+    const list = backupsListCache || [];
+    const rows = list.map(function(b){
+      const d = new Date(b.createdAt);
+      const label = fmtDateShort(d)+" "+d.getDate()+" "+MONTHS[d.getMonth()]+" "+d.getFullYear()+" · "+pad2(d.getHours())+":"+pad2(d.getMinutes());
+      if (ui.confirmRestoreBackupId === b.id) {
+        return '<div class="list-row"><div>Restore data to this snapshot — <b>'+escapeHtml(label)+'</b> ('+b.entryCount+' entries)? This replaces whatever is currently live.</div>'+
+          '<div class="actions"><button class="chip-btn danger" onclick="App.restoreBackup(\''+b.id+'\')">Confirm Restore</button>'+
+          '<button class="chip-btn" onclick="App.cancelRestoreBackup()">Cancel</button></div></div>';
+      }
+      return '<div class="list-row"><div><b>'+escapeHtml(label)+'</b><div style="font-size:12px;color:var(--muted);">'+b.entryCount+' entries</div></div>'+
+        '<div class="actions"><button class="chip-btn danger" onclick="App.confirmRestoreBackup(\''+b.id+'\')">Restore this snapshot</button></div></div>';
+    }).join("");
+    const body = backupsListLoading ? '<div style="color:var(--muted);font-size:14px;">Loading backups…</div>'
+      : backupsListError ? ('<div style="color:var(--bad);font-size:14px;">'+escapeHtml(backupsListError)+'</div>')
+      : (rows || '<div style="color:var(--muted);font-size:14px;">No backups yet — one is saved automatically every time data is saved.</div>');
+    return (
+      '<div class="card panel">'+
+        '<div class="panel-head"><h3>Backups</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
+        '<div style="color:var(--muted);font-size:13px;margin-bottom:14px;">A snapshot is saved automatically every time data is saved — no action needed. Snapshots from the last 2 days are kept in full; older ones are thinned to one per day, up to 30 days back.</div>'+
+        body+
       '</div>'
     );
   }
@@ -3052,7 +3181,26 @@
       else setUi({ pinError:true });
     },
     logoutManager: function(){ setMgrIdentity(null); setUi({ mScreen:"dashboard" }); },
-    gotoManager: function(screen){ setUi({ mScreen:screen }); },
+    gotoManager: function(screen){
+      setUi({ mScreen:screen });
+      if (screen === "backups" && !backupsListCache && !backupsListLoading) loadBackupsList();
+    },
+    confirmRestoreBackup: function(id){ setUi({ confirmRestoreBackupId:id }); },
+    cancelRestoreBackup: function(){ setUi({ confirmRestoreBackupId:null }); },
+    restoreBackup: function(id){
+      if (!dbApi || !dbApi.getBackupState) { showToast("Not connected — can't restore right now."); return; }
+      showToast("Restoring…");
+      dbApi.getBackupState(id).then(function(backupState){
+        if (!backupState) { showToast("Couldn't load that backup — it may have been removed."); return; }
+        STATE = backupState;
+        migrateState();
+        setUi({ confirmRestoreBackupId:null });
+        persist(false, "Restored from backup.", "Restored locally, but couldn't save — check connection.");
+      }).catch(function(e){
+        console.error("Shift Floor: restore failed", e);
+        showToast("Restore failed — check connection and try again.");
+      });
+    },
     openModal: function(name){
       const patch = { modal:name };
       if (name === "enterFor") { patch.entryDate = null; patch.entryDateEditing = false; }
