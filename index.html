@@ -2272,9 +2272,13 @@
         const editDate = e.entryDate || dateOnlyStr(e.ts);
         const minEditStr = dateOnlyStr((function(){ const d = new Date(); d.setFullYear(d.getFullYear()-1); return d; })());
         const maxEditStr = todayDateOnly();
+        const taskOptsForEdit = STATE.tasks.map(function(t){ return '<option value="'+t.id+'"'+(t.id===e.taskId?' selected':'')+'>'+escapeHtml(t.name)+(t.active?'':' (hidden)')+'</option>'; }).join("");
         return '<div class="list-row" style="flex-wrap:wrap;">'+
           '<div style="flex:1;min-width:200px;"><b>'+escapeHtml(attributionName)+'</b> — '+escapeHtml(taskName)+'</div>'+
           '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">'+
+            // Lets a manager move this entry to a different task — e.g. to undo a
+            // Review Jobs request that got matched/approved to the wrong task.
+            '<select id="editEntryTask-'+e.id+'" style="padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+taskOptsForEdit+'</select>'+
             '<input type="number" min="0" id="editEntryMade-'+e.id+'" value="'+e.made+'" style="width:74px;padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);"> made'+
             '<input type="number" min="0" id="editEntryFaults-'+e.id+'" value="'+e.faults+'" style="width:74px;padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);"> faults'+
             '<input type="date" id="editEntryDate-'+e.id+'" value="'+editDate+'" min="'+minEditStr+'" max="'+maxEditStr+'" style="padding:8px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
@@ -2496,9 +2500,20 @@
           '<div class="actions"><button class="chip-btn" onclick="App.saveTaskEdit(\''+t.id+'\')">Save</button>'+
           '<button class="chip-btn" onclick="App.cancelTaskEdit()">Cancel</button></div></div>';
       }
+      // Aliases (typed-in job names learned via Review Jobs "Match to This Job") are shown
+      // so a wrongly-matched one can be spotted and detached — see App.removeTaskAlias().
+      // Otherwise a worker typing that same label again would keep auto-matching here.
+      const aliasChips = (t.aliases||[]).map(function(a, idx){
+        // Pass the alias by index (not the text itself) — alias text can contain an
+        // apostrophe, which would break out of the onclick's JS string literal.
+        return '<span class="chip-btn" style="display:inline-flex;gap:6px;align-items:center;padding:5px 10px;">'+escapeHtml(a)+
+          '<button style="background:none;border:none;color:var(--bad);cursor:pointer;font-weight:700;padding:0;" title="Remove this alias" onclick="App.removeTaskAlias(\''+t.id+'\','+idx+')">×</button></span>';
+      }).join(" ");
       return (
-        '<div class="list-row" draggable="true" ondragstart="event.dataTransfer.setData(\'text/plain\',\''+t.id+'\')" ondragover="event.preventDefault()" ondrop="App.reorderTask(event,\''+t.id+'\')">'+
-        '<div class="name">⠿ '+escapeHtml(t.name)+(t.active?'':' <span class="inactive-tag">(hidden)</span>')+'</div>'+
+        '<div class="list-row" draggable="true" ondragstart="event.dataTransfer.setData(\'text/plain\',\''+t.id+'\')" ondragover="event.preventDefault()" ondrop="App.reorderTask(event,\''+t.id+'\')" style="flex-wrap:wrap;">'+
+        '<div class="name">⠿ '+escapeHtml(t.name)+(t.active?'':' <span class="inactive-tag">(hidden)</span>')+
+          (aliasChips ? ('<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">'+aliasChips+'</div>') : '')+
+        '</div>'+
         '<div class="actions">'+
           '<button class="chip-btn" onclick="App.toggleTask(\''+t.id+'\')">'+(t.active?'Hide':'Unhide')+'</button>'+
           '<button class="chip-btn" onclick="App.startTaskEdit(\''+t.id+'\')">Edit</button>'+
@@ -2821,17 +2836,54 @@
       '</div>'
     );
   }
+  // "Enter for a Worker" — serial scanning now applies here too, not just the worker's own
+  // tablet: if the selected task is the serial task (Final Assy) and there's at least one
+  // good unit, Save Entry moves into a scan-serials sub-stage inside this same modal
+  // (mirroring the worker flow's camera/type-in/counter/defer behavior) before actually
+  // saving. See App.submitEnterFor()/finishEnterFor()/App.addEnterForSerial().
+  function enterForScanStageBody(){
+    const needed = Math.max(0, (ui.efMade||0) - (ui.efFaults||0));
+    const list = ui.efSerialsList || [];
+    const rows = list.map(function(s, idx){
+      return '<div class="list-row"><div class="name num">'+escapeHtml(s)+'</div><button class="chip-btn danger" onclick="App.removeEnterForSerial('+idx+')">Remove</button></div>';
+    }).join("");
+    const errVal = ui.efSerialError ? escapeHtml(ui.efSerialError.value) : "";
+    const errClass = ui.efSerialError ? " input-error" : "";
+    const errMsg = ui.efSerialError ? '<div style="color:var(--bad);font-size:13px;margin-top:-8px;">'+escapeHtml(ui.efSerialError.message)+'</div>' : "";
+    const canSubmit = list.length === needed;
+    const worker = findWorker(ui.efWorkerId);
+    const task = findTask(ui.efTaskId);
+    return (
+      '<div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">'+
+        '<div class="card modal">'+
+          '<h3 style="margin-bottom:6px;">Scan or type serials</h3>'+
+          '<div style="color:var(--muted);font-size:13px;margin-bottom:14px;">'+escapeHtml(task?task.name:"")+' for '+escapeHtml(worker?worker.name:"")+' · Only good/passed units need one. ('+list.length+'/'+needed+') entered.</div>'+
+          '<button class="btn btn-ghost" onclick="App.openCameraForEnterForScan()">📷 Scan with camera</button>'+
+          '<input class="big'+errClass+'" type="text" id="efSerialInput" value="'+errVal+'" placeholder="Or type serial, then Enter" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addEnterForSerial();}">'+
+          errMsg+
+          '<button class="btn btn-ghost" onclick="App.addEnterForSerial()">Add Serial</button>'+
+          (rows ? '<div class="confirm-summary" style="max-height:220px;overflow-y:auto;">'+rows+'</div>' : "")+
+          '<div class="btn-row">'+
+            '<button class="btn btn-ghost" onclick="App.backToEnterForForm()">Back</button>'+
+            '<button class="btn btn-ghost" onclick="App.finishEnterForNow(false)">Do the rest later</button>'+
+            '<button class="btn btn-primary" '+(canSubmit?"":"disabled")+' onclick="App.finishEnterForNow(true)">Save Entry</button>'+
+          '</div>'+
+        '</div>'+
+      '</div>'
+    );
+  }
   function enterForModal(){
-    const workers = STATE.workers.map(function(w){ return '<option value="'+w.id+'">'+escapeHtml(w.name)+(w.active?'':' (hidden)')+'</option>'; }).join("");
-    const tasks = STATE.tasks.map(function(t){ return '<option value="'+t.id+'">'+escapeHtml(t.name)+(t.active?'':' (hidden)')+'</option>'; }).join("");
+    if (ui.efStage === "scanSerials") return enterForScanStageBody();
+    const workers = STATE.workers.map(function(w){ return '<option value="'+w.id+'"'+(w.id===ui.efWorkerId?' selected':'')+'>'+escapeHtml(w.name)+(w.active?'':' (hidden)')+'</option>'; }).join("");
+    const tasks = STATE.tasks.map(function(t){ return '<option value="'+t.id+'"'+(t.id===ui.efTaskId?' selected':'')+'>'+escapeHtml(t.name)+(t.active?'':' (hidden)')+'</option>'; }).join("");
     return (
       '<div class="modal-backdrop" onclick="if(event.target===this) App.closeModal()">'+
         '<div class="card modal">'+
           '<h3 style="margin-bottom:16px;">Enter Numbers for a Worker</h3>'+
           '<div class="field"><label>Worker</label><select id="efWorker">'+workers+'</select></div>'+
           '<div class="field"><label>Task</label><select id="efTask">'+tasks+'</select></div>'+
-          '<div class="field"><label>Made / Tested</label><input type="number" min="0" id="efMade" placeholder="0"></div>'+
-          '<div class="field"><label>Failed / Faulty</label><input type="number" min="0" id="efFaults" placeholder="0"></div>'+
+          '<div class="field"><label>Made / Tested</label><input type="number" min="0" id="efMade" value="'+(ui.efMade!=null?ui.efMade:"")+'" placeholder="0"></div>'+
+          '<div class="field"><label>Failed / Faulty</label><input type="number" min="0" id="efFaults" value="'+(ui.efFaults!=null?ui.efFaults:"")+'" placeholder="0"></div>'+
           '<div style="margin-bottom:6px;">'+entryDateBlock({ introPrefix:"Entering this on the worker’s behalf" })+'</div>'+
           '<div class="btn-row">'+
             '<button class="btn btn-ghost" onclick="App.closeModal()">Cancel</button>'+
@@ -2840,6 +2892,22 @@
         '</div>'+
       '</div>'
     );
+  }
+
+  // Shared by App.submitEnterFor()/finishEnterForNow() — actually writes the entry (and
+  // any scanned serials) and closes the modal, resetting every ef*/entryDate ui field.
+  function finishEnterFor(workerId, taskId, made, faults, entryDate, serialsList){
+    const mgrId = getMgrIdentity();
+    const entry = addEntry(workerId, taskId, made, faults, "manager", { entryDate: entryDate, enteredByManager: mgrId, successMsg:"Entry saved." });
+    if (serialsList && serialsList.length) {
+      const ts = new Date().toISOString();
+      const dateForSerials = entryDate || todayDateOnly();
+      serialsList.forEach(function(s){
+        STATE.serials.push({ id:uid("s"), serial:s, taskId:taskId, workerId:workerId, entryId:entry.id, ts:ts, entryDate:dateForSerials });
+      });
+    }
+    setUi({ modal:null, entryDate:null, entryDateEditing:false, efStage:null, efSerialsList:null, efWorkerId:null, efTaskId:null, efMade:null, efFaults:null, efEntryDate:null, efSerialError:null });
+    showToast("Entry saved for "+((findWorker(workerId)||{}).name||"worker")+".");
   }
 
   /* ---------------- actions ---------------- */
@@ -3275,10 +3343,14 @@
     },
     openModal: function(name){
       const patch = { modal:name };
-      if (name === "enterFor") { patch.entryDate = null; patch.entryDateEditing = false; }
+      if (name === "enterFor") {
+        patch.entryDate = null; patch.entryDateEditing = false;
+        patch.efStage = null; patch.efSerialsList = null; patch.efSerialError = null;
+        patch.efWorkerId = null; patch.efTaskId = null; patch.efMade = null; patch.efFaults = null; patch.efEntryDate = null;
+      }
       setUi(patch);
     },
-    closeModal: function(){ setUi({ modal:null, entryDate:null, entryDateEditing:false }); },
+    closeModal: function(){ setUi({ modal:null, entryDate:null, entryDateEditing:false, efStage:null, efSerialsList:null, efSerialError:null, efWorkerId:null, efTaskId:null, efMade:null, efFaults:null, efEntryDate:null }); },
 
     addTask: function(){
       const input = document.getElementById("newTaskName");
@@ -3288,6 +3360,18 @@
       persist(); render();
     },
     toggleTask: function(id){ const t = findTask(id); if (t) { t.active = !t.active; persist(); render(); } },
+    // Undo tool: detaches a wrongly-learned alias from a task (e.g. a Review Jobs "Match
+    // to This Job" that was pointed at the wrong existing task) — see resolvePendingMatch()
+    // where aliases get added. Doesn't touch any entry that already exists; use the Entry
+    // Log's task selector (saveEntryEdit()) to move the actual wrongly-created entry.
+    removeTaskAlias: function(taskId, idx){
+      const t = findTask(taskId);
+      if (!t || !Array.isArray(t.aliases) || !t.aliases[idx]) return;
+      const removed = t.aliases[idx];
+      t.aliases = t.aliases.filter(function(_, i){ return i !== idx; });
+      persist(false, "Removed alias “"+removed+"” from "+t.name+".");
+      render();
+    },
     startTaskEdit: function(id){ setUi({ editingTaskId:id }); },
     cancelTaskEdit: function(){ setUi({ editingTaskId:null }); },
     saveTaskEdit: function(id){
@@ -3410,10 +3494,21 @@
     saveEntryEdit: function(id){
       const e = STATE.entries.find(function(x){ return x.id===id; });
       if (!e) return;
+      const taskSelect = document.getElementById("editEntryTask-"+id);
       const madeInput = document.getElementById("editEntryMade-"+id);
       const faultsInput = document.getElementById("editEntryFaults-"+id);
       const dateInput = document.getElementById("editEntryDate-"+id);
       const made = clamp0(madeInput ? madeInput.value : e.made);
+      // Undo tool: lets a manager reassign an entry to a different task — e.g. one that
+      // was matched/approved to the wrong task from Review Jobs. Also moves any serials
+      // scanned against this entry so they stay consistent with its new task. Recomputes
+      // the faults cap against whichever task ends up selected, in case that task has a
+      // different (or no) parts-per-unit.
+      if (taskSelect && taskSelect.value && taskSelect.value !== e.taskId && findTask(taskSelect.value)) {
+        const newTaskId = taskSelect.value;
+        STATE.serials.forEach(function(s){ if (s.entryId === e.id) s.taskId = newTaskId; });
+        e.taskId = newTaskId;
+      }
       const task = findTask(e.taskId);
       const ppu = (task && task.partsPerUnit) || 1;
       const faults = clamp0(Math.min(clamp0(faultsInput ? faultsInput.value : e.faults), made*ppu));
@@ -3574,16 +3669,87 @@
       addEntry(req.workerId, newTask.id, req.made, req.faults, "worker", { ts:req.ts, entryDate:req.entryDate, successMsg:"New task created and announced.", failMsg:"Saved locally — will sync." });
       render();
     },
+    // "Enter for a Worker" now applies the same serial-scanning rule the worker's own
+    // tablet uses: if this is the serial task (Final Assy) and there's at least one good
+    // unit, don't save yet — move into the scan-serials sub-stage (enterForScanStageBody())
+    // first. Otherwise save immediately, same as before.
     submitEnterFor: function(){
       const w = document.getElementById("efWorker").value;
       const t = document.getElementById("efTask").value;
       const made = clamp0(document.getElementById("efMade").value);
       const faults = clamp0(document.getElementById("efFaults").value);
       if (!w || !t) return;
-      const mgrId = getMgrIdentity();
-      addEntry(w, t, made, faults, "manager", { entryDate: ui.entryDate, enteredByManager: mgrId, successMsg:"Entry saved." });
-      setUi({ modal:null, entryDate:null, entryDateEditing:false });
-      showToast("Entry saved for "+((findWorker(w)||{}).name||"worker")+".");
+      const goodUnits = Math.max(0, made - faults);
+      if (t === STATE.serialTaskId && goodUnits > 0) {
+        setUi({ efWorkerId:w, efTaskId:t, efMade:made, efFaults:faults, efEntryDate: ui.entryDate, efStage:"scanSerials", efSerialsList:[], efSerialError:null });
+        return;
+      }
+      finishEnterFor(w, t, made, faults, ui.entryDate, null);
+    },
+    backToEnterForForm: function(){
+      setUi({ efStage:null, efSerialsList:null, efSerialError:null });
+    },
+    addEnterForSerial: function(){
+      const input = document.getElementById("efSerialInput");
+      const raw = input ? input.value.trim() : "";
+      if (!raw) return;
+      const needed = Math.max(0, (ui.efMade||0) - (ui.efFaults||0));
+      const list = (ui.efSerialsList || []).slice();
+      if (list.length >= needed) { showToast("Already have "+needed+" serial(s) for this batch."); return; }
+
+      const fmtErr = validateSerialFormat(raw);
+      if (fmtErr) { setUi({ efSerialError:{ value:raw, message:fmtErr } }); return; }
+
+      const dup = STATE.serials.some(function(s){ return s.serial===raw; }) || list.indexOf(raw)>-1;
+      if (dup) { setUi({ efSerialError:{ value:raw, message:"Already recorded — enter a different serial." } }); return; }
+
+      const existingFault = (STATE.faultBoards||[]).find(function(b){ return b.serial===raw && b.status!=="passed"; });
+      if (existingFault) {
+        if (existingFault.status === "set_aside") {
+          setUi({ efSerialError:{ value:raw, message:"This unit was set aside — check with a manager before using it." } });
+          return;
+        }
+        // Same Fault Log cross-check as the worker flow (see addScannedSerial()), just
+        // resolved right here with a confirm rather than a separate interstitial screen —
+        // there's no manager identity ambiguity to preserve inside this modal.
+        closeCameraScan();
+        const mgrId = getMgrIdentity();
+        const mgr = (STATE.managers||[]).find(function(m){ return m.id===mgrId; });
+        existingFault.status = "passed";
+        existingFault.history.push({ id:uid("fbh"), action:"confirmed_good", status:"passed", notes:"Confirmed good via Enter for a Worker", entryDate: todayDateOnly(), ts:new Date().toISOString(), by: mgr?mgr.name:mgrId });
+        persist(false, "Board confirmed Good.", "Saved locally — will sync.");
+        showToast("This serial was logged Faulty — confirmed Good.");
+      }
+
+      list.push(raw);
+      setUi({ efSerialsList:list, efSerialError:null });
+      const el = document.getElementById("efSerialInput");
+      if (el) el.value = "";
+    },
+    removeEnterForSerial: function(idx){
+      const list = (ui.efSerialsList || []).slice();
+      list.splice(idx,1);
+      setUi({ efSerialsList:list });
+    },
+    openCameraForEnterForScan: function(){
+      openCameraScan({
+        targetCount: Math.max(0, (ui.efMade||0) - (ui.efFaults||0)),
+        getCount: function(){ return (ui.efSerialsList||[]).length; },
+        feed: function(code){
+          const el = document.getElementById("efSerialInput");
+          if (el) el.value = code;
+          App.addEnterForSerial();
+        }
+      });
+    },
+    // finishEnterForNow(withSerials): true = "Save Entry" from the scan stage (only enabled
+    // once the full count is entered); false = "Do the rest later" — saves the entry with
+    // whatever serials have been scanned so far (or none), same as the worker flow's defer.
+    finishEnterForNow: function(withSerials){
+      const needed = Math.max(0, (ui.efMade||0) - (ui.efFaults||0));
+      const list = ui.efSerialsList || [];
+      if (withSerials && list.length !== needed) { showToast("Enter all "+needed+" serial number(s) first, or use “Do the rest later”."); return; }
+      finishEnterFor(ui.efWorkerId, ui.efTaskId, ui.efMade, ui.efFaults, ui.efEntryDate, list);
     },
     setSummaryYear: function(y){ setUi({ summaryYear:y }); },
     setLastWeekSummaryWeek: function(weekKey){ setUi({ lastWeekSummarySelectedWeek: weekKey }); },
