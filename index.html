@@ -148,6 +148,10 @@
   }
   input.big{text-align:center; font-family:var(--font-mono); font-weight:600;}
   input.big[type="text"]{font-family:var(--font-body); font-weight:400; text-align:left;}
+  /* Worker-mode "how many faulty" input — a red, low-opacity tint that makes the
+     transition from the previous (made) question visually obvious, so it isn't mistaken
+     for a repeat of the same question. */
+  input.big.field-faults{ background:var(--bad-soft); border-color:var(--bad); }
   .btn{
     border:none; border-radius:12px; padding:16px 20px; font-size:17px; font-weight:700;
     display:flex; align-items:center; justify-content:center; gap:8px; width:100%;
@@ -547,6 +551,11 @@
   const SMT_YIELD_NAMES = ["7000-03+01 BOTTOM INSP/REWORK","7000-03+01 TOP INSP/REWORK","7010-03+01 Power board TOP INSP/REWORK","7020-03+01 Camera board BOT INSP/REWORK","7020-03+01 Camera board TOP INSP/REWORK","4625 Modem Board BOT INSP/REWORK","4625 Modem Board TOP INSP/REWORK","4000-12 CPU BOT INSP/REWORK","4000-12 CPU TOP INSP/REWORK"];
   const THROUGHHOLE_YIELD_NAMES = ["7000-03+01 Main board TOUCH-UP","7010-03+01 Power board TOUCH-UP","7020-03+01 Camera board TOUCH-UP","4625 Modem board TOUCH-UP","4000-12 CPU board TOUCH-UP"];
   const TEST_YIELD_NAMES = ["7000-03+01 Main board TEST","7010-03+01 Power board TEST","7020-03+01 Camera board TEST","4625 SAT Modem Board Test","4000-12 CPU Board Test"];
+  // Fault Log traceability now also covers 7000AI PROVISIONING (in addition to the
+  // Test-yield tasks above) — faults>0 there triggers the same scan/description/job/date
+  // collection flow. Units logged faulty here get cross-checked against scans at Final
+  // Assy (see App.addScannedSerial()/faultConfirmPromptBody()).
+  const FAULT_BOARD_TASK_NAMES = TEST_YIELD_NAMES.concat(["7000AI PROVISIONING"]);
   // Feature: About panel QR code (points to this app so it can be opened on another
   // tablet/phone) — base64 PNG generated ahead of time, embedded inline as a data URI.
   const ABOUT_QR_B64 = "iVBORw0KGgoAAAANSUhEUgAAAQgAAAEIAQAAAACLjVdSAAABkUlEQVR4nO1YQW7EMBCCKv//Mj0MY3ulSj11FtWbSImTcCAjbPBQ+OX4+g3wQfxjBNQCUY0lqJ78OYXpDOKB/527BjXotylM5+rhWoiiSAjwBQpiOo6gWDOF1M+IGR5vRTx76FlCCGdBUpgO1sN/T4GCyHrUJI8UxOkvr2d/TmE6po81Nyj6juNtCtM5fQgdOWS5SOoPl+mjMhjk2zF/uiopTMcQ6uSFmi+WhlDGG8R0APE4d1EgAZGQlxG/TmE6g+BOo75QdADhhfm0klf9ftWgZLETewrTMQTrrEkiSCSIKs0kjwgE18aNDut8jasxTAf1ARGUQLsvyC2QIKYDiAoZHT06mXUYgS7MHxRBvegDAEDd6i82FW/0O5nZdVOYDq6n6l6QI0fnsVv14WEbjJbt3Jc/nqUG1fZF9l5WRzWH6Vg9Vied6p3MDiE5TOfqsfrrbgntRfW+9eNAUOCSibzORjL9Q8TRX7fteqg7/fbor3vRcJcdbTUpTOfqYYOhM1k9yIkkhul4/ngrjw8iE/ENFL7bvb84SNoAAAAASUVORK5CYII=";
@@ -1212,7 +1221,7 @@
   function faultBoardHistoryHtml(board){
     const rows = (board.history||[]).slice().reverse().map(function(h){
       return '<div class="list-row"><div><div>'+escapeHtml(FAULT_STATUS_LABELS[h.status]||h.status)+
-        (h.desc?(' — '+escapeHtml(h.desc)):'')+(h.job?(' · Job '+escapeHtml(h.job)):'')+'</div>'+
+        (h.desc?(' — '+escapeHtml(h.desc)):'')+(h.job?(' · Job '+escapeHtml(h.job)):'')+(h.notes?(' — '+escapeHtml(h.notes)):'')+'</div>'+
         '<div style="font-size:12px;color:var(--muted);">'+escapeHtml(h.entryDate||"")+' · '+escapeHtml(h.by||"")+'</div></div></div>';
     }).join("");
     return '<div style="text-align:left;margin-top:10px;"><div class="section-title" style="margin:10px 0 4px;">History</div>'+rows+'</div>';
@@ -1800,14 +1809,35 @@
       '<div class="kiosk-sub">'+subLabel+'</div>'+
       entryDateBlock()+
       '<div class="kiosk-body">'+
-        '<input class="big" type="number" min="-9999" id="faultsInput" data-autofocus="1" placeholder="0" onkeydown="if(event.key===\'Enter\'){event.preventDefault();'+btnAction+';}">'+
+        '<input class="big field-faults" type="number" min="-9999" id="faultsInput" data-autofocus="1" placeholder="0" onkeydown="if(event.key===\'Enter\'){event.preventDefault();'+btnAction+';}">'+
         (isSerialTask ? "" : '<div class="kiosk-sub" style="font-size:12.5px;margin-top:-8px;">Enter a negative number (e.g. -1) to correct a mistake from earlier this week.</div>')+
         '<button class="btn btn-primary" onclick="'+btnAction+'">'+btnLabel+'</button>'+
         '<button class="link-btn" onclick="App.goto(\'enterMade\')">Back</button>'+
       '</div>'
     );
   }
+  // Fault Log traceability — interstitial shown mid-scan (Final Assy) when a scanned/typed
+  // serial matches a unit still logged faulty elsewhere (e.g. Provisioning). Confirming
+  // marks that fault-board record "passed" (with an optional note) and only then adds the
+  // serial to this batch; cancelling leaves it out so the worker can deal with it separately.
+  function faultConfirmPromptBody(){
+    const fc = ui.faultConfirm || {};
+    const board = (STATE.faultBoards||[]).find(function(b){ return b.id===fc.boardId; });
+    const originTask = board ? findTask(board.taskId) : null;
+    const serialTask = findTask(STATE.serialTaskId);
+    return (
+      '<div class="task-name-tag">'+escapeHtml(serialTask?serialTask.name:"Serials")+'</div>'+
+      '<div class="kiosk-title" style="margin-top:12px;">This unit was logged as Faulty</div>'+
+      '<div class="kiosk-sub">Serial <b class="num">'+escapeHtml(fc.serial||"")+'</b>'+(originTask?(' — originally logged at '+escapeHtml(originTask.name)):'')+'.</div>'+
+      '<div class="kiosk-body">'+
+        '<textarea id="faultConfirmNotes" placeholder="Notes (e.g. fixed, reprogrammed)" style="width:100%;min-height:80px;padding:12px;border-radius:10px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px;font-family:var(--font-body);"></textarea>'+
+        '<button class="btn btn-primary" onclick="App.confirmFaultBoardGood()">Confirm as Good now</button>'+
+        '<button class="link-btn" onclick="App.cancelFaultConfirm()">Cancel — don’t add this serial</button>'+
+      '</div>'
+    );
+  }
   function scanSerialsBody(){
+    if (ui.faultConfirm) return faultConfirmPromptBody();
     const needed = Math.max(0, ui.made - ui.faults);
     const list = ui.serialsList || [];
     const rows = list.map(function(s, idx){
@@ -1822,7 +1852,7 @@
     return (
       '<div class="task-name-tag">'+escapeHtml(serialTask?serialTask.name:"Serials")+'</div>'+
       '<div class="kiosk-title" style="margin-top:12px;">Scan or type each passed unit’s serial number</div>'+
-      '<div class="kiosk-sub">Only good/passed units need one. '+list.length+' of '+needed+' entered'+(remaining>0?(' — '+remaining+' to go'):'')+'</div>'+
+      '<div class="kiosk-sub">Only good/passed units need one. ('+list.length+'/'+needed+') entered'+(remaining>0?(' — '+remaining+' to go'):'')+'</div>'+
       '<div class="kiosk-body">'+
         '<button class="btn btn-ghost" onclick="App.openCameraForWorkerScan()">📷 Scan with camera</button>'+
         '<input class="big'+errClass+'" type="text" id="serialInput" data-autofocus="1" value="'+errVal+'" placeholder="Or type serial, then Enter" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.addScannedSerial();}">'+
@@ -2885,6 +2915,24 @@
       const dup = STATE.serials.some(function(s){ return s.serial===raw; }) || list.indexOf(raw)>-1;
       if (dup) { setUi({ serialError:{ value:raw, message:"Already recorded — enter a different serial." } }); focusSelectSerialInput(false); return; }
 
+      // Fault Log cross-check: a unit logged faulty (e.g. at Provisioning) shouldn't
+      // silently count as a good/passed unit just because it's being scanned here. Any
+      // fault-board record for this serial that isn't already "passed" interrupts the
+      // scan with a confirm-as-good prompt (faultConfirmPromptBody) instead of being added
+      // straight to the batch; "set_aside" units are blocked outright, since undoing a
+      // set-aside is a manager decision.
+      const existingFault = (STATE.faultBoards||[]).find(function(b){ return b.serial===raw && b.status!=="passed"; });
+      if (existingFault) {
+        if (existingFault.status === "set_aside") {
+          setUi({ serialError:{ value:raw, message:"This unit was set aside — check with a manager before using it." } });
+          focusSelectSerialInput(false);
+          return;
+        }
+        closeCameraScan();
+        setUi({ serialError:null, faultConfirm:{ serial:raw, boardId:existingFault.id } });
+        return;
+      }
+
       list.push(raw);
       setUi({ serialsList:list, serialError:null });
       focusSelectSerialInput(true);
@@ -2893,6 +2941,30 @@
       const list = (ui.serialsList || []).slice();
       list.splice(idx,1);
       setUi({ serialsList:list });
+    },
+    // Fault Log traceability — resolves the faultConfirmPromptBody() interstitial. See
+    // addScannedSerial() for where this gets triggered.
+    confirmFaultBoardGood: function(){
+      const fc = ui.faultConfirm;
+      if (!fc) return;
+      const b = (STATE.faultBoards||[]).find(function(x){ return x.id===fc.boardId; });
+      if (!b) { setUi({ faultConfirm:null }); return; }
+      const notesEl = document.getElementById("faultConfirmNotes");
+      const notes = notesEl ? notesEl.value.trim() : "";
+      const workerId = getAssignedWorkerId();
+      const worker = findWorker(workerId);
+      const byName = worker ? worker.name : "Worker";
+      b.status = "passed";
+      b.history.push({ id:uid("fbh"), action:"confirmed_good", status:"passed", notes: notes || null, entryDate: todayDateOnly(), ts:new Date().toISOString(), by: byName });
+      persist(false, "Board confirmed Good.", "Saved locally — will sync.");
+      const list = (ui.serialsList || []).slice();
+      list.push(fc.serial);
+      setUi({ serialsList:list, faultConfirm:null, serialError:null });
+      focusSelectSerialInput(true);
+    },
+    cancelFaultConfirm: function(){
+      setUi({ faultConfirm:null });
+      focusSelectSerialInput(false);
     },
     // Feature 2: camera scanning for the worker's just-finished-a-job flow — each
     // detected barcode is fed into the SAME addScannedSerial() the manual input uses, so
@@ -2939,10 +3011,10 @@
       }
       const entryDate = ui.entryDate || todayDateOnly();
 
-      // Feature: Fault Log traceability — for TEST_YIELD_NAMES tasks with faults>0, collect
-      // a serial/description/job/date for each faulty unit BEFORE finishing this entry.
-      // Skipped once faultBoardStage is "done" (i.e. we're re-entering here right after
-      // logFaultBoardNext() finished collecting the batch).
+      // Feature: Fault Log traceability — for FAULT_BOARD_TASK_NAMES tasks (Test-yield +
+      // Provisioning) with faults>0, collect a serial/description/job/date for each faulty
+      // unit BEFORE finishing this entry. Skipped once faultBoardStage is "done" (i.e.
+      // we're re-entering here right after logFaultBoardNext() finished collecting the batch).
       if (faults > 0 && ui.faultBoardStage !== "done") {
         let resolvedTaskId = ui.taskId;
         if (ui.taskId === "__other__") {
@@ -2950,7 +3022,7 @@
           const match = findTaskByNameOrAlias(otherLabel);
           resolvedTaskId = match ? match.id : null;
         }
-        if (resolvedTaskId && resolveNamesToIds(TEST_YIELD_NAMES).indexOf(resolvedTaskId) > -1) {
+        if (resolvedTaskId && resolveNamesToIds(FAULT_BOARD_TASK_NAMES).indexOf(resolvedTaskId) > -1) {
           setUi({
             screen:"logFaultBoard", faults:faults, faultBoardStage:"collecting", faultBoardCount:faults,
             faultBoardIndex:0, faultBoardQueue:[], faultBoardTaskId:resolvedTaskId,
@@ -2965,11 +3037,11 @@
         const match = findTaskByNameOrAlias(label);
         if (match) {
           addEntry(workerId, match.id, made, faults, "worker", { entryDate:entryDate, successMsg:"Entry logged to the dashboard ✅", failMsg:"Not sent yet — retrying…" });
-          setUi({ screen:"askAnother", faults:faults, resolvedName:match.name, pendingReview:false, serialsCount:null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
+          setUi({ screen:"askAnother", faults:faults, resolvedName:match.name, pendingReview:false, serialsCount:null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
         } else {
           STATE.pendingRequests.push({ id:uid("p"), workerId:workerId, label:label, made:made, faults:faults, ts:new Date().toISOString(), entryDate:entryDate, status:"pending" });
           persist(false, "Sent to the manager for review ✅", "Not sent yet — retrying…");
-          setUi({ screen:"askAnother", faults:faults, pendingReview:true, resolvedName:null, serialsCount:null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
+          setUi({ screen:"askAnother", faults:faults, pendingReview:true, resolvedName:null, serialsCount:null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
         }
       } else {
         // Feature 3: only require/attach the scanned serials when we're actually coming
@@ -2990,7 +3062,7 @@
             STATE.serials.push({ id:uid("s"), serial:s, taskId:ui.taskId, workerId:workerId, entryId:entry.id, ts:ts, entryDate:entryDate });
           });
         }
-        setUi({ screen:"askAnother", faults:faults, resolvedName:null, pendingReview:false, serialsList:null, serialsCount: serialsToSave ? serialsToSave.length : null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
+        setUi({ screen:"askAnother", faults:faults, resolvedName:null, pendingReview:false, serialsList:null, serialsCount: serialsToSave ? serialsToSave.length : null, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
       }
     },
     // Feature: Fault Log traceability — collects one faulty board's serial/description/
@@ -3170,8 +3242,8 @@
     },
     toggleEntryDateEdit: function(on){ setUi({ entryDateEditing: !!on, entryDate: on ? (ui.entryDate || todayDateOnly()) : null }); },
     anotherJob: function(yes){
-      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
-      else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null });
+      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
+      else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
     },
     submitPin: function(){
       const input = document.getElementById("pinInput");
