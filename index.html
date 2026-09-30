@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shift Floor</title>
+<title>Production</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0E7A63">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Shift Floor">
+<meta name="apple-mobile-web-app-title" content="Production">
 <link rel="icon" href="icon-192.png" sizes="192x192" type="image/png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
@@ -1514,16 +1514,16 @@
     if (connectFailed) {
       return (
         '<div class="kiosk"><div class="card kiosk-card">'+
-          '<div class="kiosk-eyebrow">Shift Floor</div>'+
-          '<h1 class="kiosk-title">Can’t connect to Shift Floor</h1>'+
+          '<div class="kiosk-eyebrow">Production Floor Control</div>'+
+          '<h1 class="kiosk-title">Can’t connect to Production Floor Control</h1>'+
           '<div class="kiosk-sub">Check the network connection and reopen the app. To protect production data, nothing will be shown or saved until we can confirm the real state.</div>'+
         '</div></div>'
       );
     }
     return (
       '<div class="kiosk"><div class="card kiosk-card">'+
-        '<div class="kiosk-eyebrow">Shift Floor</div>'+
-        '<h1 class="kiosk-title">Connecting to Shift Floor…</h1>'+
+        '<div class="kiosk-eyebrow">Production Floor Control</div>'+
+        '<h1 class="kiosk-title">Connecting to Production Floor Control…</h1>'+
         '<div class="connect-spinner"></div>'+
         '<div class="kiosk-sub">Waiting to sync with the shared record before showing any numbers.</div>'+
       '</div></div>'
@@ -1580,7 +1580,7 @@
     return (
       '<div class="shell" style="padding-bottom:0;">'+
         '<div class="topbar">'+
-          '<div class="brand"><img src="'+MTDATA_LOGO_DATAURI+'" alt="MTData" class="brand-logo"><div><div class="brand-name">Shift Floor</div>'+
+          '<div class="brand"><img src="'+MTDATA_LOGO_DATAURI+'" alt="MTData" class="brand-logo"><div><div class="brand-name">Production Floor Control</div>'+
           '<div style="font-size:12px;color:var(--muted);margin-top:-2px;">'+ (mode==="manager" ? "Manager Dashboard" : "Worker Update") + identityLine +'</div></div></div>'+
           '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'+
             statusPillHtml()+
@@ -1597,7 +1597,7 @@
       '<div class="kiosk">'+
         '<div class="card kiosk-card">'+
           '<img src="'+MTDATA_LOGO_DATAURI+'" alt="MTData" class="brand-logo" style="height:56px;margin:0 auto 16px;">'+
-          '<div class="kiosk-title">Shift Floor</div>'+
+          '<div class="kiosk-title">Production Floor Control</div>'+
           '<div class="kiosk-sub">Is this the worker tablet, or the manager dashboard?</div>'+
           '<div class="kiosk-body">'+
             '<button class="btn btn-primary" onclick="App.switchMode(\'worker\')">This is a Worker Tablet</button>'+
@@ -2703,12 +2703,25 @@
   // backups (see persist()/pruneOldBackups() above), each restorable back to live state.
   function managerBackupsPanel(){
     const list = backupsListCache || [];
+    const canRestore = getMgrIdentity() === "mark";
     const rows = list.map(function(b){
       const d = new Date(b.createdAt);
       const label = fmtDateShort(d)+" "+d.getDate()+" "+MONTHS[d.getMonth()]+" "+d.getFullYear()+" · "+pad2(d.getHours())+":"+pad2(d.getMinutes());
+      if (ui.restorePasscodeBackupId === b.id) {
+        return '<div class="list-row"><div style="width:100%;">'+
+          '<div style="margin-bottom:8px;">Enter your passcode to restore <b>'+escapeHtml(label)+'</b> ('+b.entryCount+' entries):</div>'+
+          '<input id="restorePasscodeInput" type="password" inputmode="numeric" placeholder="Passcode" style="max-width:160px;" onkeydown="if(event.key===\'Enter\'){App.submitRestorePasscode(\''+b.id+'\');}" autofocus>'+
+          (ui.restorePasscodeError ? '<div style="color:var(--bad);font-size:12px;margin-top:6px;">'+escapeHtml(ui.restorePasscodeError)+'</div>' : '')+
+          '<div class="actions" style="margin-top:10px;"><button class="chip-btn danger" onclick="App.submitRestorePasscode(\''+b.id+'\')">Confirm</button>'+
+          '<button class="chip-btn" onclick="App.cancelRestoreBackup()">Cancel</button></div>'+
+        '</div></div>';
+      }
+      if (!canRestore) {
+        return '<div class="list-row"><div><b>'+escapeHtml(label)+'</b><div style="font-size:12px;color:var(--muted);">'+b.entryCount+' entries</div></div></div>';
+      }
       if (ui.confirmRestoreBackupId === b.id) {
-        return '<div class="list-row"><div>Restore data to this snapshot — <b>'+escapeHtml(label)+'</b> ('+b.entryCount+' entries)? This replaces whatever is currently live.</div>'+
-          '<div class="actions"><button class="chip-btn danger" onclick="App.restoreBackup(\''+b.id+'\')">Confirm Restore</button>'+
+        return '<div class="list-row"><div>Are you sure? This will delete data past the selected date.</div>'+
+          '<div class="actions"><button class="chip-btn danger" onclick="App.confirmRestoreBackup2(\''+b.id+'\')">Yes, continue</button>'+
           '<button class="chip-btn" onclick="App.cancelRestoreBackup()">Cancel</button></div></div>';
       }
       return '<div class="list-row"><div><b>'+escapeHtml(label)+'</b><div style="font-size:12px;color:var(--muted);">'+b.entryCount+' entries</div></div>'+
@@ -2720,8 +2733,67 @@
     return (
       '<div class="card panel">'+
         '<div class="panel-head"><h3>Backups</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
-        '<div style="color:var(--muted);font-size:13px;margin-bottom:14px;">A snapshot is saved automatically every time data is saved — no action needed. Snapshots from the last 2 days are kept in full; older ones are thinned to one per day, up to 30 days back.</div>'+
+        '<div style="color:var(--muted);font-size:13px;margin-bottom:14px;">A snapshot is saved automatically every time data is saved — no action needed. Snapshots from the last 2 days are kept in full; older ones are thinned to one per day, up to 30 days back.'+
+          (canRestore ? "" : " Restoring a snapshot is restricted to Mark.")+
+        '</div>'+
         body+
+        recoverMissingEntriesSection()+
+      '</div>'
+    );
+  }
+  // Recover missing entries — pulls just the entries from a chosen day (or range) out of a
+  // backup snapshot and adds back only whatever isn't already in the live data, leaving
+  // everything else (including anything entered since) completely untouched. Built for the
+  // case where "Restore this snapshot" would be too blunt — e.g. new data has been added
+  // since the loss and can't be risked by a full overwrite.
+  function recoverMissingEntriesSection(){
+    const list = backupsListCache || [];
+    const yesterday = dateOnlyStr((function(){ const d = new Date(); d.setDate(d.getDate()-1); return d; })());
+    const from = ui.recoverFrom || yesterday;
+    const to = ui.recoverTo || yesterday;
+    const backupOpts = list.map(function(b){
+      const d = new Date(b.createdAt);
+      const label = fmtDateShort(d)+" "+d.getDate()+" "+MONTHS[d.getMonth()]+" "+d.getFullYear()+" · "+pad2(d.getHours())+":"+pad2(d.getMinutes())+" ("+b.entryCount+" entries)";
+      return '<option value="'+b.id+'"'+(b.id===ui.recoverBackupId?' selected':'')+'>'+escapeHtml(label)+'</option>';
+    }).join("");
+    let previewHtml = "";
+    if (ui.recoverLoading) {
+      previewHtml = '<div style="color:var(--muted);font-size:14px;margin-top:10px;">Comparing against the current live data…</div>';
+    } else if (ui.recoverError) {
+      previewHtml = '<div style="color:var(--bad);font-size:14px;margin-top:10px;">'+escapeHtml(ui.recoverError)+'</div>';
+    } else if (ui.recoverPreview) {
+      const pv = ui.recoverPreview;
+      if (!pv.missingEntries.length) {
+        previewHtml = '<div style="color:var(--muted);font-size:14px;margin-top:10px;">No missing entries found in that date range — the live data already has everything this snapshot had for '+escapeHtml(pv.from===pv.to?pv.from:(pv.from+' to '+pv.to))+'.</div>';
+      } else {
+        const byWorkerCounts = {};
+        pv.missingEntries.forEach(function(e){
+          const w = findWorker(e.workerId);
+          const name = w ? w.name : "Unknown worker";
+          byWorkerCounts[name] = (byWorkerCounts[name]||0) + 1;
+        });
+        const breakdown = Object.keys(byWorkerCounts).map(function(name){ return escapeHtml(name)+" ("+byWorkerCounts[name]+")"; }).join(", ");
+        previewHtml =
+          '<div class="confirm-summary" style="margin-top:10px;">'+
+            '<div><span>Found</span><b>'+pv.missingEntries.length+' missing entr'+(pv.missingEntries.length===1?'y':'ies')+'</b></div>'+
+            '<div><span>By worker</span><b>'+breakdown+'</b></div>'+
+            '<div><span>Date range</span><b>'+escapeHtml(pv.from===pv.to?pv.from:(pv.from+' to '+pv.to))+'</b></div>'+
+          '</div>'+
+          '<div style="color:var(--muted);font-size:13px;margin-top:8px;">Adding these back only inserts what\'s missing — anything already in the live data (including anything entered today) is left exactly as it is.</div>'+
+          '<div class="btn-row" style="margin-top:10px;"><button class="btn btn-primary" onclick="App.confirmRecoverMissingEntries()">Add These '+pv.missingEntries.length+' Back</button></div>';
+      }
+    }
+    return (
+      '<div style="margin-top:22px;border-top:1px dashed var(--line);padding-top:16px;">'+
+        '<div class="section-title" style="margin-top:0;">Recover missing entries from a backup</div>'+
+        '<div style="color:var(--muted);font-size:13px;margin-bottom:12px;">Pick a snapshot and a date range — this only adds back entries from that range that aren\'t already in the live data. It never overwrites or removes anything.</div>'+
+        '<div class="field"><label>Snapshot</label><select id="recoverBackupSelect" onchange="App.setRecoverBackupId(this.value)">'+(backupOpts||'<option value="">No backups available</option>')+'</select></div>'+
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px;">'+
+          '<div class="field" style="flex:1;min-width:160px;"><label>From date</label><input type="date" id="recoverFromDate" value="'+from+'" max="'+todayDateOnly()+'" onchange="App.setRecoverFrom(this.value)"></div>'+
+          '<div class="field" style="flex:1;min-width:160px;"><label>To date</label><input type="date" id="recoverToDate" value="'+to+'" max="'+todayDateOnly()+'" onchange="App.setRecoverTo(this.value)"></div>'+
+        '</div>'+
+        '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.previewRecoverMissingEntries()">Preview What Would Be Added</button>'+
+        previewHtml+
       '</div>'
     );
   }
@@ -3325,9 +3397,26 @@
       setUi({ mScreen:screen });
       if (screen === "backups" && !backupsListCache && !backupsListLoading) loadBackupsList();
     },
-    confirmRestoreBackup: function(id){ setUi({ confirmRestoreBackupId:id }); },
-    cancelRestoreBackup: function(){ setUi({ confirmRestoreBackupId:null }); },
+    confirmRestoreBackup: function(id){
+      if (getMgrIdentity() !== "mark") return;
+      setUi({ confirmRestoreBackupId:id });
+    },
+    confirmRestoreBackup2: function(id){
+      if (getMgrIdentity() !== "mark") return;
+      setUi({ confirmRestoreBackupId:null, restorePasscodeBackupId:id, restorePasscodeError:null });
+    },
+    cancelRestoreBackup: function(){ setUi({ confirmRestoreBackupId:null, restorePasscodeBackupId:null, restorePasscodeError:null }); },
+    submitRestorePasscode: function(id){
+      if (getMgrIdentity() !== "mark") return;
+      const me = (STATE.managers||[]).find(function(m){ return m.id === "mark"; });
+      const input = document.getElementById("restorePasscodeInput");
+      const val = input ? input.value.trim() : "";
+      if (!me || !val || val !== me.pin) { setUi({ restorePasscodeError:"Incorrect passcode. Try again." }); return; }
+      setUi({ restorePasscodeBackupId:null, restorePasscodeError:null });
+      App.restoreBackup(id);
+    },
     restoreBackup: function(id){
+      if (getMgrIdentity() !== "mark") return;
       if (!dbApi || !dbApi.getBackupState) { showToast("Not connected — can't restore right now."); return; }
       showToast("Restoring…");
       dbApi.getBackupState(id).then(function(backupState){
@@ -3340,6 +3429,64 @@
         console.error("Shift Floor: restore failed", e);
         showToast("Restore failed — check connection and try again.");
       });
+    },
+    // Recover missing entries (a safer alternative to a full restore when there's newer
+    // live data that can't be risked): setters just clear any stale preview, since the old
+    // one no longer matches the new selection.
+    setRecoverBackupId: function(id){ setUi({ recoverBackupId:id, recoverPreview:null, recoverError:null }); },
+    setRecoverFrom: function(val){ setUi({ recoverFrom:val, recoverPreview:null, recoverError:null }); },
+    setRecoverTo: function(val){ setUi({ recoverTo:val, recoverPreview:null, recoverError:null }); },
+    previewRecoverMissingEntries: function(){
+      const id = ui.recoverBackupId || (document.getElementById("recoverBackupSelect")||{}).value;
+      const from = ui.recoverFrom || (document.getElementById("recoverFromDate")||{}).value;
+      const to = ui.recoverTo || (document.getElementById("recoverToDate")||{}).value;
+      if (!id) { setUi({ recoverError:"Pick a snapshot first." }); return; }
+      if (!from || !to) { setUi({ recoverError:"Pick a from/to date first." }); return; }
+      if (parseDateBasis(from) > parseDateBasis(to)) { setUi({ recoverError:"“From” date is after “To” date." }); return; }
+      if (!dbApi || !dbApi.getBackupState) { setUi({ recoverError:"Not connected — can't compare right now." }); return; }
+      setUi({ recoverLoading:true, recoverError:null, recoverPreview:null, recoverBackupId:id, recoverFrom:from, recoverTo:to });
+      dbApi.getBackupState(id).then(function(backupState){
+        if (!backupState || !Array.isArray(backupState.entries)) {
+          setUi({ recoverLoading:false, recoverError:"Couldn't load that backup — it may have been removed." });
+          return;
+        }
+        const inRange = function(e){
+          const d = parseDateBasis(e.entryDate || dateOnlyStr(e.ts));
+          return d >= parseDateBasis(from) && d <= parseDateBasis(to);
+        };
+        const currentIds = {};
+        STATE.entries.forEach(function(e){ currentIds[e.id] = true; });
+        const missingEntries = backupState.entries.filter(function(e){ return inRange(e) && !currentIds[e.id]; });
+        const missingIds = {};
+        missingEntries.forEach(function(e){ missingIds[e.id] = true; });
+        const missingSerials = (Array.isArray(backupState.serials) ? backupState.serials : []).filter(function(s){
+          return s.entryId && missingIds[s.entryId];
+        });
+        setUi({
+          recoverLoading:false, recoverError:null,
+          recoverPreview: { backupId:id, from:from, to:to, missingEntries:missingEntries, missingSerials:missingSerials }
+        });
+      }).catch(function(e){
+        console.error("Shift Floor: recover preview failed", e);
+        setUi({ recoverLoading:false, recoverError:"Couldn't load that backup — check connection and try again." });
+      });
+    },
+    confirmRecoverMissingEntries: function(){
+      const pv = ui.recoverPreview;
+      if (!pv || !pv.missingEntries || !pv.missingEntries.length) return;
+      // Purely additive — nothing already in STATE.entries/STATE.serials is touched, moved,
+      // or removed, so anything added since the snapshot (e.g. today's entries) is unaffected.
+      const currentIds = {};
+      STATE.entries.forEach(function(e){ currentIds[e.id] = true; });
+      const toAdd = pv.missingEntries.filter(function(e){ return !currentIds[e.id]; });
+      STATE.entries = STATE.entries.concat(toAdd);
+      const currentSerialIds = {};
+      STATE.serials.forEach(function(s){ currentSerialIds[s.id] = true; });
+      const serialsToAdd = (pv.missingSerials||[]).filter(function(s){ return !currentSerialIds[s.id]; });
+      STATE.serials = STATE.serials.concat(serialsToAdd);
+      migrateState();
+      persist(false, "Added "+toAdd.length+" missing entr"+(toAdd.length===1?"y":"ies")+" back.", "Added locally — will sync.");
+      setUi({ recoverPreview:null, recoverBackupId:null });
     },
     openModal: function(name){
       const patch = { modal:name };

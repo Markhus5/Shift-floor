@@ -1,6 +1,6 @@
 {
-  "name": "Shift Floor",
-  "short_name": "Shift Floor",
+  "name": "Production",
+  "short_name": "Production",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
