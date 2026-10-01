@@ -440,6 +440,8 @@
   function pad2(n){ return n < 10 ? "0"+n : ""+n; }
   const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const DOWS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  const MONTHS_LONG = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const DOWS_LONG = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 
   // Date-only ("YYYY-MM-DD") helpers used for entryDate (the day an entry is attributed
   // to) as distinct from ts (the moment it was actually submitted) — see Fix 3.
@@ -495,6 +497,13 @@
     const d = Math.round(h/24);
     return d + (d===1?" day ago":" days ago");
   }
+  // Heading format for grouping scanned serials by date, e.g. "October 1, 2026 Thursday" —
+  // deliberately a different, fuller format than fmtDateShort's abbreviated style, per an
+  // explicit request so date-group headings stand out and survive a CSV copy/paste cleanly.
+  function fmtSerialDateHeading(d){
+    const x = parseDateBasis(d);
+    return MONTHS_LONG[x.getMonth()]+" "+x.getDate()+", "+x.getFullYear()+" "+DOWS_LONG[x.getDay()];
+  }
   function fmtPct(n){ return n==null ? "—" : n.toFixed(1)+"%"; }
   function monthKeyOf(d){ const x = parseDateBasis(d); return x.getFullYear()+"-"+pad2(x.getMonth()+1); }
   function monthStartFor(d){ const x = parseDateBasis(d); return new Date(x.getFullYear(), x.getMonth(), 1); }
@@ -530,7 +539,18 @@
     "7010-03+01 PSU TOP (SMT)","7020-03+01 CAM BOT (SMT)","7020-03+01 CAM TOP (SMT)"
   ];
   const SMT_SEED_TAG = "v3-smt-top-1";
-  const DEFAULT_SERIAL_FORMAT = { totalLength:9, prefixes:["7010","701"] };
+  // Replaces the old digits-only, fixed-length/prefix serial format (which assumed plain
+  // numeric serials and rejected any real board serial containing dashes/plus/spaces, e.g.
+  // "7000-03+01 003858") with a flexible template system: each entry's `pattern` is a
+  // literal string where "X" marks a serial-digit placeholder and every other character
+  // (including dashes, "+", and spaces) must match exactly. A scanned/typed serial is valid
+  // if it matches ANY configured pattern — one per board type (7000/7010/7020 etc.), fully
+  // editable from Settings so the prefix format can be changed to anything in future.
+  const DEFAULT_SERIAL_FORMATS = [
+    { id:"fmt-7000", label:"7000 board", pattern:"7000-03+01 XXXXXX" },
+    { id:"fmt-7010", label:"7010 board", pattern:"7010-03+01 XXXXXX" },
+    { id:"fmt-7020", label:"7020 board", pattern:"7020-03+01 XXXXXX" }
+  ];
   // Retargets serial scanning from "7000AI PROVISIONING" to "7000AI Final Assy" — a task
   // that already exists in live Firestore data (created earlier via the "other job" alias
   // flow) but isn't in this file's DEFAULT_TASK_NAMES seed list. See migrateState(): this
@@ -591,7 +611,7 @@
       headlineTaskId: null,
       serialTaskId: null,
       serials: [],
-      serialFormat: Object.assign({}, DEFAULT_SERIAL_FORMAT),
+      serialFormats: DEFAULT_SERIAL_FORMATS.map(function(f){ return Object.assign({}, f); }),
       finalAssySeedTag: null,
       reassignUntil: null,
       seedTag: null,
@@ -657,6 +677,13 @@
   function setPriorityCollapsed(v){ try { localStorage.setItem(mgrKey("td_priorityCollapsed"), v?"1":"0"); } catch(e){} }
   function isSerialsCollapsed(){ try { return localStorage.getItem(mgrKey("td_serialsCollapsed"))==="1"; } catch(e){ return false; } }
   function setSerialsCollapsed(v){ try { localStorage.setItem(mgrKey("td_serialsCollapsed"), v?"1":"0"); } catch(e){} }
+  // Worker-scoped (per assigned-worker-id, mirroring mgrKey) collapse state for the two new
+  // worker-home panels: pinned task shortcuts and "My Entries".
+  function workerKey(base){ return base + "_" + (getAssignedWorkerId() || "guest"); }
+  function isShortcutsCollapsed(){ try { return localStorage.getItem(workerKey("td_shortcutsCollapsed"))==="1"; } catch(e){ return false; } }
+  function setShortcutsCollapsed(v){ try { localStorage.setItem(workerKey("td_shortcutsCollapsed"), v?"1":"0"); } catch(e){} }
+  function isMyEntriesCollapsed(){ try { return localStorage.getItem(workerKey("td_myEntriesCollapsed"))==="1"; } catch(e){ return false; } }
+  function setMyEntriesCollapsed(v){ try { localStorage.setItem(workerKey("td_myEntriesCollapsed"), v?"1":"0"); } catch(e){} }
   function isYieldCollapsed(){ try { return localStorage.getItem(mgrKey("td_yieldCollapsed"))==="1"; } catch(e){ return false; } }
   function setYieldCollapsed(v){ try { localStorage.setItem(mgrKey("td_yieldCollapsed"), v?"1":"0"); } catch(e){} }
   function isReassignOpen(){ return !!(STATE && STATE.reassignUntil && new Date(STATE.reassignUntil).getTime() > Date.now()); }
@@ -689,6 +716,11 @@
       if (typeof t.active !== "boolean") { t.active = true; changed = true; }
     });
     if (!STATE.workers) { STATE.workers = []; changed = true; }
+    // Worker shortcut pins (up to 3 tasks, manually pinned by the worker from the task
+    // picker) — see pickTaskBody()/toggleWorkerTaskPin().
+    STATE.workers.forEach(function(w){
+      if (!Array.isArray(w.pinnedTasks)) { w.pinnedTasks = []; changed = true; }
+    });
     if (!STATE.entries) { STATE.entries = []; changed = true; }
     STATE.entries.forEach(function(e){
       // Fix 3 (backdating): every entry needs a date-only entryDate it's attributed to,
@@ -798,10 +830,15 @@
       STATE.finalAssySeedTag = FINAL_ASSY_SEED_TAG;
       changed = true;
     }
-    if (!STATE.serialFormat || !STATE.serialFormat.totalLength || !STATE.serialFormat.prefixes) {
-      STATE.serialFormat = Object.assign({}, DEFAULT_SERIAL_FORMAT);
+    // Replaces the old single digits-only/prefix serialFormat with an array of per-board-
+    // type literal+"X" templates (see DEFAULT_SERIAL_FORMATS above). Any pre-existing
+    // STATE.serialFormat from before this change is simply dropped — it was built on an
+    // assumption (plain numeric serials) that didn't match real board serials anyway.
+    if (!Array.isArray(STATE.serialFormats) || !STATE.serialFormats.length) {
+      STATE.serialFormats = DEFAULT_SERIAL_FORMATS.map(function(f){ return Object.assign({}, f); });
       changed = true;
     }
+    if (STATE.serialFormat !== undefined) { delete STATE.serialFormat; changed = true; }
 
     if (STATE.smtSeedTag !== SMT_SEED_TAG) {
       const existingSmt = {};
@@ -1226,13 +1263,25 @@
     }).join("");
     return '<div style="text-align:left;margin-top:10px;"><div class="section-title" style="margin:10px 0 4px;">History</div>'+rows+'</div>';
   }
+  // A serial matches a template when it's the same length and every character lines up
+  // with the pattern's literal characters exactly, except where the pattern has "X" —
+  // those positions just need to be a single digit. Dashes, "+", spaces, letters, etc. in
+  // the pattern are literal and must match exactly (case-sensitive).
+  function matchesSerialPattern(raw, pattern){
+    if (raw.length !== pattern.length) return false;
+    for (let i=0; i<pattern.length; i++) {
+      const pc = pattern[i], rc = raw[i];
+      if (pc === "X") { if (!/[0-9]/.test(rc)) return false; }
+      else if (pc !== rc) return false;
+    }
+    return true;
+  }
   function validateSerialFormat(raw){
-    const fmt = STATE.serialFormat || DEFAULT_SERIAL_FORMAT;
-    if (!/^[0-9]+$/.test(raw)) return "Wrong format — digits only.";
-    if (raw.length !== fmt.totalLength) return "Wrong format — must be "+fmt.totalLength+" digits total.";
-    const okPrefix = (fmt.prefixes||[]).some(function(p){ return raw.indexOf(p)===0; });
-    if (!okPrefix) return "Wrong format — must start with "+(fmt.prefixes||[]).join(" or ")+".";
-    return null;
+    const formats = (Array.isArray(STATE.serialFormats) && STATE.serialFormats.length) ? STATE.serialFormats : DEFAULT_SERIAL_FORMATS;
+    const ok = formats.some(function(f){ return matchesSerialPattern(raw, f.pattern || ""); });
+    if (ok) return null;
+    const examples = formats.map(function(f){ return f.pattern; }).join(" or ");
+    return "Wrong format — must match "+examples+" (X = any digit).";
   }
   function focusSelectSerialInput(clearValue){
     setTimeout(function(){
@@ -1705,27 +1754,112 @@
       '</div>'
     );
   }
+  // Worker shortcuts: up to 3 tasks the worker has pinned themselves (via the pin button
+  // next to each task in the picker below). Purely manual — no auto-suggested "most
+  // common" tasks. Clicking a shortcut skips straight to the "made" quantity screen.
+  // Newest pin shows at the top; pinning past the 3-item cap bumps the bottom (oldest) one.
+  function taskShortcutsSection(owner){
+    if (!owner) return "";
+    const pinnedIds = Array.isArray(owner.pinnedTasks) ? owner.pinnedTasks : [];
+    const pinned = pinnedIds.map(function(id){ return findTask(id); }).filter(Boolean);
+    if (!pinned.length) return "";
+    const collapsed = isShortcutsCollapsed();
+    const header = '<div class="section-title" style="margin:18px 4px 8px;display:flex;align-items:center;justify-content:space-between;gap:10px;">'+
+      '<span>Shortcuts</span>'+
+      '<button type="button" class="link-btn" style="margin:0;" onclick="App.toggleShortcutsCollapse()">'+(collapsed?"▸ Expand":"▾ Collapse")+'</button>'+
+    '</div>';
+    if (collapsed) return header;
+    const rows = pinned.map(function(t, idx){
+      const upBtn = idx>0 ? '<button type="button" class="chip-btn" style="padding:3px 9px;" title="Move up" onclick="App.moveWorkerShortcut('+idx+',-1)">▲</button>' : "";
+      const downBtn = idx<pinned.length-1 ? '<button type="button" class="chip-btn" style="padding:3px 9px;" title="Move down" onclick="App.moveWorkerShortcut('+idx+',1)">▼</button>' : "";
+      return '<div class="list-row">'+
+        '<button type="button" class="btn btn-ghost" style="flex:1;margin:0;text-align:left;" onclick="App.pickTaskShortcut(\''+t.id+'\')">'+escapeHtml(t.name)+'</button>'+
+        '<div class="actions" style="gap:4px;">'+upBtn+downBtn+
+          '<button type="button" class="chip-btn danger" style="padding:3px 9px;" title="Unpin" onclick="App.toggleWorkerTaskPin(\''+t.id+'\')">✕</button>'+
+        '</div></div>';
+    }).join("");
+    return header + '<div class="card" style="padding:6px;text-align:left;">'+rows+'</div>';
+  }
+  // Read-only view of the logged-in worker's own entries, so they can confirm what's
+  // actually been saved and track their own progress. Never shows other workers' entries.
+  // Includes entries a manager entered on their behalf (tagged "entered by <manager>").
+  function myEntriesSection(owner){
+    if (!owner) return "";
+    const collapsed = isMyEntriesCollapsed();
+    const header = '<div class="section-title" style="margin:22px 4px 8px;display:flex;align-items:center;justify-content:space-between;gap:10px;">'+
+      '<span>My Entries</span>'+
+      '<button type="button" class="link-btn" style="margin:0;" onclick="App.toggleMyEntriesCollapse()">'+(collapsed?"▸ Expand":"▾ Collapse")+'</button>'+
+    '</div>';
+    if (collapsed) return header;
+
+    const view = ui.myEntriesView === "week" ? "week" : "day";
+    const dayDate = (ui.myEntriesDate && /^\d{4}-\d{2}-\d{2}$/.test(ui.myEntriesDate)) ? ui.myEntriesDate : todayDateOnly();
+    const weekStartStr = (ui.myEntriesWeekStart && /^\d{4}-\d{2}-\d{2}$/.test(ui.myEntriesWeekStart)) ? ui.myEntriesWeekStart : dateOnlyStr(weekStartFor(new Date()));
+    const minStr = dateOnlyStr((function(){ const d = new Date(); d.setDate(d.getDate()-60); return d; })());
+    const maxStr = todayDateOnly();
+
+    const switcher = '<div style="display:flex;gap:8px;">'+
+      '<button type="button" class="chip-btn'+(view==="day"?" chip-active":"")+'" onclick="App.setMyEntriesView(\'day\')">Day</button>'+
+      '<button type="button" class="chip-btn'+(view==="week"?" chip-active":"")+'" onclick="App.setMyEntriesView(\'week\')">Week</button>'+
+    '</div>';
+    const picker = view==="day"
+      ? '<input type="date" value="'+dayDate+'" min="'+minStr+'" max="'+maxStr+'" onchange="App.setMyEntriesDate(this.value)" style="padding:8px 10px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'
+      : '<input type="date" value="'+weekStartStr+'" min="'+minStr+'" max="'+maxStr+'" onchange="App.setMyEntriesWeekStart(this.value)" title="Pick any day in the week" style="padding:8px 10px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">';
+
+    const list = STATE.entries.filter(function(e){
+      if (e.workerId !== owner.id) return false;
+      return view==="day" ? (e.entryDate === dayDate) : (weekKeyOf(e.entryDate) === weekKeyOf(weekStartStr));
+    }).sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
+
+    const rows = list.map(function(e){
+      const t = findTask(e.taskId);
+      const mgr = e.enteredByManager ? (STATE.managers||[]).find(function(m){ return m.id===e.enteredByManager; }) : null;
+      const whoTag = mgr ? (' · entered by '+escapeHtml(mgr.name)) : "";
+      return '<div class="list-row"><div><div>'+escapeHtml(t?t.name:"(removed task)")+'</div>'+
+        '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · '+escapeHtml(e.entryDate||"")+whoTag+' · '+fmtRelTime(e.ts)+'</div></div></div>';
+    }).join("");
+
+    const totalMade = list.reduce(function(s,e){ return s+Math.max(0,e.made); }, 0);
+    const totalFaults = list.reduce(function(s,e){ return s+Math.max(0,e.faults); }, 0);
+    const summary = list.length ? ('<div style="font-size:12px;color:var(--muted);margin-bottom:8px;">Total: '+totalMade+' made / '+totalFaults+' faults across '+list.length+' entr'+(list.length===1?'y':'ies')+'</div>') : "";
+
+    return header +
+      '<div class="card" style="text-align:left;">'+
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px;">'+switcher+picker+'</div>'+
+        summary+
+        (rows || '<div style="color:var(--muted);font-size:14px;">No entries for this '+(view==="day"?"day":"week")+' yet.</div>')+
+      '</div>';
+  }
   function pickTaskBody(){
     const tasks = activeTasks();
     if (!tasks.length) {
       return '<div class="kiosk-eyebrow">Setup needed</div><div class="kiosk-title">No tasks yet</div>'+
         '<div class="kiosk-sub">Ask the manager to add tasks from the Manager Dashboard first.</div>';
     }
-    const opts = tasks.map(function(t){ return '<option value="'+t.id+'">'+escapeHtml(t.name)+'</option>'; }).join("")+
-      '<option value="__other__">Other job not in the list</option>';
     const owner = findWorker(getAssignedWorkerId());
+    const pinnedIds = (owner && Array.isArray(owner.pinnedTasks)) ? owner.pinnedTasks : [];
     const switchLink = isReassignOpen()
       ? '<button class="link-btn" onclick="App.changeOwner()">Not '+escapeHtml(owner?owner.name:"")+'? Switch worker</button>'
       : "";
+    const selectedId = ui.taskPickerSelectedId || "";
+    const listRows = tasks.map(function(t){
+      const pinned = pinnedIds.indexOf(t.id) > -1;
+      const selected = selectedId === t.id;
+      const pinBtn = '<button type="button" class="chip-btn'+(pinned?' chip-active':'')+'" style="padding:4px 9px;font-size:12px;" title="'+(pinned?'Unpin from shortcuts':'Pin to shortcuts')+'" onclick="event.stopPropagation();App.toggleWorkerTaskPin(\''+t.id+'\')">'+(pinned?'📌':'📌 Pin')+'</button>';
+      return '<div class="list-row" style="cursor:pointer;'+(selected?'background:var(--surface-2);':'')+'" onclick="App.selectPickTask(\''+t.id+'\')"><div>'+escapeHtml(t.name)+'</div><div class="actions">'+pinBtn+'</div></div>';
+    }).join("") +
+      '<div class="list-row" style="cursor:pointer;'+(selectedId==="__other__"?'background:var(--surface-2);':'')+'" onclick="App.selectPickTask(\'__other__\')"><div>Other job not in the list</div></div>';
     return (
       '<div class="kiosk-eyebrow">Step 1 of 2</div>'+
       '<div class="kiosk-title">What do you want to update?</div>'+
       '<div class="kiosk-sub">Choose the task you just worked on.</div>'+
+      taskShortcutsSection(owner)+
       '<div class="kiosk-body">'+
-        '<select class="big" id="taskSelect">'+opts+'</select>'+
-        '<button class="btn btn-primary" onclick="App.pickTask()">Next</button>'+
+        '<div class="card" style="max-height:320px;overflow-y:auto;text-align:left;padding:4px;">'+listRows+'</div>'+
+        '<button class="btn btn-primary" onclick="App.pickTask()"'+(selectedId?'':' disabled')+'>Next</button>'+
         switchLink+
-      '</div>'
+      '</div>'+
+      myEntriesSection(owner)
     );
   }
   function otherJobLabelBody(){
@@ -2125,6 +2259,19 @@
     return header + '<div class="task-grid" ondragover="event.preventDefault()">'+cells.join("")+'</div>';
   }
 
+  // Groups an (already time-sorted) serials list by the day it's attributed to
+  // (entryDate, falling back to its ts's date), preserving the list's existing order —
+  // used both by the manager serials panel (date headings) and the CSV/clipboard copy.
+  function groupSerialsByDate(list){
+    const order = [];
+    const map = {};
+    list.forEach(function(s){
+      const key = s.entryDate || dateOnlyStr(s.ts);
+      if (!map[key]) { map[key] = []; order.push(key); }
+      map[key].push(s);
+    });
+    return order.map(function(key){ return { date:key, items:map[key] }; });
+  }
   function serialPanelSection(curKey){
     if (!STATE.serialTaskId) return "";
     const collapsed = isSerialsCollapsed();
@@ -2147,7 +2294,12 @@
     '</div>';
     if (collapsed) return header;
 
-    const rows = list.map(function(s){
+    // Group by the day each serial is attributed to, so scans can be told apart at a
+    // glance per day. Today's group keeps the plain original row format (no heading,
+    // "Kim 1 hour ago"); every earlier day gets a heading like "October 1, 2026 Thursday
+    // (total 15)" above its rows — this also carries through to the CSV/clipboard copy.
+    const todayStr = todayDateOnly();
+    const serialRowHtml = function(s){
       const w = findWorker(s.workerId);
       if (ui.editingSerialId === s.id) {
         return '<div class="list-row"><input type="text" id="editSerialInput" value="'+escapeHtml(s.serial)+'" style="flex:1;padding:8px 10px;border-radius:8px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
@@ -2155,6 +2307,12 @@
       }
       return '<div class="list-row"><div><div class="num">'+escapeHtml(s.serial)+'</div><div style="font-size:12px;color:var(--muted);">'+escapeHtml(w?w.name:"added by manager")+' · '+fmtRelTime(s.ts)+'</div></div>'+
         '<div class="actions"><button class="chip-btn" onclick="App.startSerialEdit(\''+s.id+'\')">Edit</button><button class="chip-btn danger" onclick="App.deleteSerial(\''+s.id+'\')">Delete</button></div></div>';
+    };
+    const rows = groupSerialsByDate(list).map(function(g){
+      const groupRows = g.items.map(serialRowHtml).join("");
+      if (g.date === todayStr) return groupRows;
+      const heading = '<div class="list-row" style="border-bottom:none;padding-top:18px;"><div style="font-weight:700;">'+escapeHtml(fmtSerialDateHeading(g.date))+' (total '+g.items.length+')</div></div>';
+      return heading + groupRows;
     }).join("");
 
     // Feature 2/4: date this manually-added/scanned serial is attributed to — defaults to
@@ -2577,6 +2735,31 @@
       '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.saveStandupSchedule()">Save Stand-up Schedule</button>'
     );
   }
+  // Per-board-type serial number format editor — replaces the old single digits-only/
+  // prefix fields. Each row is a literal template ("X" = one serial digit, everything
+  // else must match exactly), and a scan/typed serial is accepted if it matches any row.
+  function serialFormatsSection(){
+    const formats = (Array.isArray(STATE.serialFormats) && STATE.serialFormats.length) ? STATE.serialFormats : DEFAULT_SERIAL_FORMATS;
+    const rows = formats.map(function(f, idx){
+      return '<div class="list-row" style="align-items:flex-start;flex-wrap:wrap;">'+
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;flex:1;min-width:220px;">'+
+          '<input type="text" id="serialFmtLabel-'+idx+'" value="'+escapeHtml(f.label||"")+'" placeholder="Board label e.g. 7010 board" style="flex:1;min-width:140px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
+          '<input type="text" id="serialFmtPattern-'+idx+'" value="'+escapeHtml(f.pattern||"")+'" placeholder="e.g. 7010-03+01 XXXXXX" style="flex:2;min-width:200px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-family:var(--font-mono);">'+
+        '</div>'+
+        '<button class="chip-btn danger" onclick="App.removeSerialFormatRow('+idx+')" title="Remove this format">Remove</button>'+
+      '</div>';
+    }).join("");
+    return (
+      '<div class="field"><label>Serial Number Formats (7000AI Final Assy)</label>'+
+        '<div style="color:var(--muted);font-size:12.5px;margin-bottom:8px;">One row per board type. Use “X” for each serial digit — everything else (dashes, “+”, spaces) must match exactly, e.g. 7010-03+01 XXXXXX. A scanned/typed serial is accepted if it matches any row below.</div>'+
+        rows+
+        '<div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">'+
+          '<button class="chip-btn" onclick="App.addSerialFormatRow()">+ Add board type</button>'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;" onclick="App.saveSerialFormats()">Save Formats</button>'+
+        '</div>'+
+      '</div>'
+    );
+  }
   function managerSettingsPanel(){
     const headlineOpts = STATE.tasks.map(function(t){
       return '<option value="'+t.id+'"'+(t.id===STATE.headlineTaskId?' selected':'')+'>'+escapeHtml(t.name)+'</option>';
@@ -2625,14 +2808,7 @@
         '</div>'+
         '<div class="section-title" style="margin:22px 0 8px;">Touch-up Parts Per Unit</div>'+
         ppuRows+
-        '<div class="field"><label>Serial Number Format (7000AI PROVISIONING)</label>'+
-          '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'+
-            '<input type="number" min="1" id="serialLenInput" value="'+(STATE.serialFormat?STATE.serialFormat.totalLength:9)+'" style="width:90px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
-            '<span style="color:var(--muted);font-size:13px;">digits total</span>'+
-          '</div>'+
-          '<input type="text" id="serialPrefixInput" value="'+escapeHtml(((STATE.serialFormat&&STATE.serialFormat.prefixes)||[]).join(", "))+'" placeholder="Valid prefixes, comma separated e.g. 7010, 701" style="padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
-          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;align-self:flex-start;" onclick="App.saveSerialFormat()">Save Format</button>'+
-        '</div>'+
+        serialFormatsSection()+
         standupScheduleSection()+
         '<div style="color:var(--muted);font-size:13px;">History is kept forever — the dashboard only changes which week or year it is summarizing.</div>'+
       '</div>'
@@ -2985,7 +3161,10 @@
   /* ---------------- actions ---------------- */
   const App = {
     switchMode: function(m){ setDeviceMode(m); ui = { screen:null }; saveUi(); render(); },
-    goto: function(screen){ setUi({ screen:screen }); },
+    goto: function(screen){
+      if (screen === "pickTask") setUi({ screen:screen, taskPickerSelectedId:null });
+      else setUi({ screen:screen });
+    },
     toggleRecall: function(){ setUi({ recallNotices: !ui.recallNotices }); },
     ackItem: function(kind,id){
       const map = { notice:"td_ackNotices", msg:"td_ackWorkerMsgs", assign:"td_ackAssignments", mgrnotice:"td_ackMgrNotices" };
@@ -2997,14 +3176,51 @@
       const sel = document.getElementById("ownerSelect");
       if (!sel || !sel.value) return;
       setAssignedWorkerId(sel.value);
-      setUi({ screen:"pickTask" });
+      setUi({ screen:"pickTask", taskPickerSelectedId:null });
     },
     changeOwner: function(){ setAssignedWorkerId(null); setUi({ screen:"pickOwner" }); },
+    selectPickTask: function(taskId){ setUi({ taskPickerSelectedId: taskId }); },
+    // Pinned-shortcut tap: skips the task picker entirely and goes straight to "made".
+    pickTaskShortcut: function(taskId){
+      if (!findTask(taskId)) return;
+      setUi({ screen:"enterMade", taskId:taskId, taskPickerSelectedId:null });
+    },
+    toggleWorkerTaskPin: function(taskId){
+      const w = findWorker(getAssignedWorkerId());
+      if (!w) return;
+      if (!Array.isArray(w.pinnedTasks)) w.pinnedTasks = [];
+      const idx = w.pinnedTasks.indexOf(taskId);
+      if (idx > -1) {
+        w.pinnedTasks.splice(idx, 1);
+      } else {
+        // Newest pin goes to the top; bump the bottom (oldest) one once past the 3-item cap.
+        w.pinnedTasks.unshift(taskId);
+        if (w.pinnedTasks.length > 3) w.pinnedTasks.pop();
+      }
+      persist(false, null, "Saved locally — will sync.");
+      render();
+    },
+    moveWorkerShortcut: function(idx, dir){
+      const w = findWorker(getAssignedWorkerId());
+      if (!w || !Array.isArray(w.pinnedTasks)) return;
+      const newIdx = idx + dir;
+      if (newIdx < 0 || newIdx >= w.pinnedTasks.length) return;
+      const arr = w.pinnedTasks.slice();
+      const tmp = arr[idx]; arr[idx] = arr[newIdx]; arr[newIdx] = tmp;
+      w.pinnedTasks = arr;
+      persist(false, null, "Saved locally — will sync.");
+      render();
+    },
+    toggleShortcutsCollapse: function(){ setShortcutsCollapsed(!isShortcutsCollapsed()); render(); },
+    toggleMyEntriesCollapse: function(){ setMyEntriesCollapsed(!isMyEntriesCollapsed()); render(); },
+    setMyEntriesView: function(v){ setUi({ myEntriesView: v==="week"?"week":"day" }); },
+    setMyEntriesDate: function(val){ if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return; setUi({ myEntriesDate: val }); },
+    setMyEntriesWeekStart: function(val){ if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) return; setUi({ myEntriesWeekStart: val }); },
     pickTask: function(){
-      const sel = document.getElementById("taskSelect");
-      if (!sel || !sel.value) return;
-      if (sel.value === "__other__") setUi({ screen:"otherJobLabel" });
-      else setUi({ screen:"enterMade", taskId:sel.value });
+      const val = ui.taskPickerSelectedId;
+      if (!val) return;
+      if (val === "__other__") setUi({ screen:"otherJobLabel" });
+      else setUi({ screen:"enterMade", taskId:val });
     },
     submitOtherLabel: function(){
       const input = document.getElementById("otherJobInput");
@@ -3382,7 +3598,7 @@
     },
     toggleEntryDateEdit: function(on){ setUi({ entryDateEditing: !!on, entryDate: on ? (ui.entryDate || todayDateOnly()) : null }); },
     anotherJob: function(yes){
-      if (yes) setUi({ screen:"pickTask", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
+      if (yes) setUi({ screen:"pickTask", taskId:null, taskPickerSelectedId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
       else setUi({ screen:"confirmOwner", taskId:null, made:0, faults:0, otherLabel:null, resolvedName:null, pendingReview:false, serialsList:null, serialsCount:null, entryDate:null, entryDateEditing:false, faultBoardStage:null, faultBoardCount:0, faultBoardIndex:0, faultBoardQueue:null, faultBoardTaskId:null, faultConfirm:null });
     },
     submitPin: function(){
@@ -3729,13 +3945,33 @@
       ui.editingSerialId = null; saveUi();
       persist(); render();
     },
-    saveSerialFormat: function(){
-      const lenInput = document.getElementById("serialLenInput");
-      const prefixInput = document.getElementById("serialPrefixInput");
-      const len = clamp0(lenInput ? lenInput.value : 9) || 9;
-      const prefixes = (prefixInput ? prefixInput.value : "").split(",").map(function(p){ return p.trim(); }).filter(Boolean);
-      STATE.serialFormat = { totalLength: len, prefixes: prefixes.length ? prefixes : ["7010","701"] };
-      persist(); showToast("Serial format updated."); render();
+    addSerialFormatRow: function(){
+      const formats = (Array.isArray(STATE.serialFormats) && STATE.serialFormats.length) ? STATE.serialFormats.slice() : DEFAULT_SERIAL_FORMATS.map(function(f){ return Object.assign({}, f); });
+      formats.push({ id: uid("fmt"), label:"New board", pattern:"" });
+      STATE.serialFormats = formats;
+      render();
+    },
+    removeSerialFormatRow: function(idx){
+      const formats = (STATE.serialFormats||[]).slice();
+      if (formats.length <= 1) { showToast("Keep at least one format."); return; }
+      formats.splice(idx,1);
+      STATE.serialFormats = formats;
+      render();
+    },
+    saveSerialFormats: function(){
+      const current = (STATE.serialFormats||[]);
+      const formats = current.map(function(f, idx){
+        const labelEl = document.getElementById("serialFmtLabel-"+idx);
+        const patternEl = document.getElementById("serialFmtPattern-"+idx);
+        return {
+          id: f.id || uid("fmt"),
+          label: labelEl ? labelEl.value.trim() : (f.label||""),
+          pattern: patternEl ? patternEl.value.trim() : (f.pattern||"")
+        };
+      }).filter(function(f){ return f.pattern; });
+      if (!formats.length) { showToast("Add at least one valid pattern."); return; }
+      STATE.serialFormats = formats;
+      persist(); showToast("Serial formats updated."); render();
     },
     deleteSerial: function(id){
       if (!confirm("Delete this serial number?")) return;
@@ -3744,8 +3980,17 @@
     },
     copySerials: function(){
       const curKey = weekKeyOf(new Date());
-      const list = ui.serialsShowAll ? STATE.serials.slice() : STATE.serials.filter(function(s){ return weekKeyOf(s.ts)===curKey; });
-      const text = list.map(function(s){ return s.serial; }).join("\n");
+      const list = (ui.serialsShowAll ? STATE.serials.slice() : STATE.serials.filter(function(s){ return weekKeyOf(s.ts)===curKey; }))
+        .sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
+      // Mirrors the on-screen date grouping (see serialPanelSection) so the copied/CSV
+      // text is separated by day the same way, with today's batch left in its original
+      // plain (un-headed) form.
+      const todayStr = todayDateOnly();
+      const text = groupSerialsByDate(list).map(function(g){
+        const serialsText = g.items.map(function(s){ return s.serial; }).join("\n");
+        if (g.date === todayStr) return serialsText;
+        return fmtSerialDateHeading(g.date)+" (total "+g.items.length+")\n"+serialsText;
+      }).join("\n\n");
       function done(){ showToast("Copied "+list.length+" serial number(s)."); }
       function fail(){
         try {
