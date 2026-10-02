@@ -504,6 +504,12 @@
     const x = parseDateBasis(d);
     return MONTHS_LONG[x.getMonth()]+" "+x.getDate()+", "+x.getFullYear()+" "+DOWS_LONG[x.getDay()];
   }
+  // Every date group gets a heading, including today's — prefixed "Today " so it still
+  // reads naturally at a glance, e.g. "Today October 2, 2026 Friday (total 14)".
+  function serialGroupHeadingText(dateStr, count){
+    const prefix = (dateStr === todayDateOnly()) ? "Today " : "";
+    return prefix+fmtSerialDateHeading(dateStr)+" (total "+count+")";
+  }
   function fmtPct(n){ return n==null ? "—" : n.toFixed(1)+"%"; }
   function monthKeyOf(d){ const x = parseDateBasis(d); return x.getFullYear()+"-"+pad2(x.getMonth()+1); }
   function monthStartFor(d){ const x = parseDateBasis(d); return new Date(x.getFullYear(), x.getMonth(), 1); }
@@ -1638,11 +1644,38 @@
       }
     } catch(e){}
   }
+  // Glitch fix: a native <select> can't survive its containing DOM being torn down and
+  // rebuilt while its dropdown is open/focused — the browser just closes it. A quiet
+  // (background, remote-triggered) render that lands while the user has a <select>
+  // focused defers the actual DOM rebuild until they finish with it (blur or change),
+  // rather than yanking the open list out from under them. STATE itself is already up to
+  // date by the time this is called — only the visual catch-up is delayed.
+  let pendingRenderRetry = false;
   function render(){
     const app = document.getElementById("app");
     if (!stateConfirmed) {
       document.getElementById("app").innerHTML = renderConnectingScreen();
       return;
+    }
+    const quiet = suppressFocusSteal;
+    if (quiet) {
+      // A retry is already queued from an earlier deferred render — it'll pick up
+      // whatever the latest STATE is once it actually fires, so there's nothing to do
+      // here except not rebuild the DOM out from under the still-open select again.
+      if (pendingRenderRetry) return;
+      const active = document.activeElement;
+      if (active && active.tagName === "SELECT") {
+        pendingRenderRetry = true;
+        const retry = function(){
+          active.removeEventListener("change", retry);
+          active.removeEventListener("blur", retry);
+          pendingRenderRetry = false;
+          render();
+        };
+        active.addEventListener("change", retry, { once:true });
+        active.addEventListener("blur", retry, { once:true });
+        return;
+      }
     }
     const mode = getDeviceMode();
     let html = "";
@@ -1656,7 +1689,6 @@
     if (toastMsg) html += '<div class="toast">'+escapeHtml(toastMsg)+'</div>';
     html += standupOverlayHtml();
     const scrollState = captureScrollState();
-    const quiet = suppressFocusSteal;
     const activeState = quiet ? captureActiveInputState() : null;
     app.innerHTML = html;
     restoreScrollState(scrollState);
@@ -2359,10 +2391,9 @@
     if (collapsed) return header;
 
     // Group by the day each serial is attributed to, so scans can be told apart at a
-    // glance per day. Today's group keeps the plain original row format (no heading,
-    // "Kim 1 hour ago"); every earlier day gets a heading like "October 1, 2026 Thursday
-    // (total 15)" above its rows — this also carries through to the CSV/clipboard copy.
-    const todayStr = todayDateOnly();
+    // glance per day — every group gets a heading, including today's (e.g. "Today
+    // October 2, 2026 Friday (total 14)"), and this carries through to the CSV/clipboard
+    // copy too. Each row underneath keeps its own original per-row format ("Kim 1 hour ago").
     const serialRowHtml = function(s){
       const w = findWorker(s.workerId);
       if (ui.editingSerialId === s.id) {
@@ -2374,8 +2405,7 @@
     };
     const rows = groupSerialsByDate(list).map(function(g){
       const groupRows = g.items.map(serialRowHtml).join("");
-      if (g.date === todayStr) return groupRows;
-      const heading = '<div class="list-row" style="border-bottom:none;padding-top:18px;"><div style="font-weight:700;">'+escapeHtml(fmtSerialDateHeading(g.date))+' (total '+g.items.length+')</div></div>';
+      const heading = '<div class="list-row" style="border-bottom:none;padding-top:18px;"><div style="font-weight:700;">'+escapeHtml(serialGroupHeadingText(g.date, g.items.length))+'</div></div>';
       return heading + groupRows;
     }).join("");
 
@@ -2532,14 +2562,22 @@
   // get attributed to that week, not today.
   function serialCatchupBanner(){
     if (!STATE.serialTaskId) return "";
-    const weeks = serialCatchupWeeks();
+    // Dismissible: if a past shortfall is never going to be fulfilled (the units are long
+    // gone, nobody's scanning them now), "Dismiss" acknowledges it the same way other
+    // notices are acked, so it stops taking up space here permanently rather than nagging
+    // every day it's open.
+    const acked = ackGet("td_ackSerialCatchup");
+    const weeks = serialCatchupWeeks().filter(function(w){ return acked.indexOf(w.key)===-1; });
     if (!weeks.length) return "";
     const rows = weeks.map(function(w){
       return '<div class="list-row"><div>'+
           '<b>'+w.shortfall+'</b> unit'+(w.shortfall===1?"":"s")+' from the week of '+escapeHtml(fmtDateShort(w.start))+' still need'+(w.shortfall===1?"s":"")+' serials scanned '+
           '<span style="color:var(--muted);font-size:12.5px;">('+w.scanned+' of '+w.target+' done)</span>'+
         '</div>'+
-        '<button class="chip-btn" onclick="App.startCatchupScan(\''+dateOnlyStr(w.start)+'\')">Catch up</button>'+
+        '<div class="actions">'+
+          '<button class="chip-btn" onclick="App.startCatchupScan(\''+dateOnlyStr(w.start)+'\')">Catch up</button>'+
+          '<button class="chip-btn" onclick="App.ackItem(\'serialCatchup\',\''+w.key+'\')" title="Hide this — use once it can no longer be fulfilled">Dismiss</button>'+
+        '</div>'+
       '</div>';
     }).join("");
     return '<div class="card banner" style="background:var(--warn-soft);flex-direction:column;align-items:stretch;gap:4px;">'+
@@ -3231,7 +3269,7 @@
     },
     toggleRecall: function(){ setUi({ recallNotices: !ui.recallNotices }); },
     ackItem: function(kind,id){
-      const map = { notice:"td_ackNotices", msg:"td_ackWorkerMsgs", assign:"td_ackAssignments", mgrnotice:"td_ackMgrNotices" };
+      const map = { notice:"td_ackNotices", msg:"td_ackWorkerMsgs", assign:"td_ackAssignments", mgrnotice:"td_ackMgrNotices", serialCatchup:"td_ackSerialCatchup" };
       ackAdd(map[kind], id);
       if (kind==="notice") ui.recallNotices = false;
       render();
@@ -4047,13 +4085,10 @@
       const list = (ui.serialsShowAll ? STATE.serials.slice() : STATE.serials.filter(function(s){ return weekKeyOf(s.ts)===curKey; }))
         .sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
       // Mirrors the on-screen date grouping (see serialPanelSection) so the copied/CSV
-      // text is separated by day the same way, with today's batch left in its original
-      // plain (un-headed) form.
-      const todayStr = todayDateOnly();
+      // text is separated by day the same way, every group (including today) headed.
       const text = groupSerialsByDate(list).map(function(g){
         const serialsText = g.items.map(function(s){ return s.serial; }).join("\n");
-        if (g.date === todayStr) return serialsText;
-        return fmtSerialDateHeading(g.date)+" (total "+g.items.length+")\n"+serialsText;
+        return serialGroupHeadingText(g.date, g.items.length)+"\n"+serialsText;
       }).join("\n\n");
       function done(){ showToast("Copied "+list.length+" serial number(s)."); }
       function fail(){
