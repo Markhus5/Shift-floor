@@ -1064,6 +1064,15 @@
 
   let firstSnapshot = true;
   let applyingRemote = false;
+  // Glitch fix: a remote update from ANY other tablet/dashboard triggers a full re-render
+  // on every OTHER open device via dbApi.subscribe() below — including one that's sitting
+  // mid-typing on an unrelated screen (classically, the manager PIN input, or scrolled
+  // partway down a list). When this flag is set around such a background render(), the
+  // currently-focused input's value/caret and any tagged scrollable container's scroll
+  // position are preserved across the DOM rebuild instead of being wiped/reset, and the
+  // usual "auto-select the primary input" behavior (focusPrimaryInput) is skipped so it
+  // can't also steal the selection out from under whatever the user is actively typing.
+  let suppressFocusSteal = false;
 
   async function init(){
     loadUi();
@@ -1122,13 +1131,17 @@
         return;
       }
       // Live update from another tablet/dashboard (or this device catching up from cache to
-      // the real server state).
+      // the real server state). This render() can land at any moment, including mid-
+      // keystroke on an unrelated screen on THIS device — suppressFocusSteal (see above)
+      // keeps it from clobbering whatever the user here is actively doing.
       applyingRemote = true;
       STATE = remoteState || STATE;
       const changed = migrateState();
       stateConfirmed = true;
       saveStatus = "saved";
+      suppressFocusSteal = true;
       render();
+      suppressFocusSteal = false;
       applyingRemote = false;
       maybePersistMigration(changed);
     });
@@ -1579,6 +1592,52 @@
     );
   }
 
+  // Glitch fix: every render() fully replaces #app's innerHTML, which would otherwise
+  // reset the scroll position of any in-page scrollable list on every single render —
+  // including ones triggered just by clicking a button elsewhere on the same screen, not
+  // only background remote updates. Any element marked data-scroll-keep (and given a
+  // stable id) has its scrollTop captured here and restored after the rebuild.
+  function captureScrollState(){
+    const map = {};
+    document.querySelectorAll("[data-scroll-keep]").forEach(function(el){
+      if (el.id) map[el.id] = el.scrollTop;
+    });
+    return map;
+  }
+  function restoreScrollState(map){
+    Object.keys(map||{}).forEach(function(id){
+      const el = document.getElementById(id);
+      if (el) el.scrollTop = map[id];
+    });
+  }
+  // Only used for a "quiet" (suppressFocusSteal) render — captures the exact input/
+  // textarea the user is actively typing into so it can be restored after the DOM rebuild,
+  // without the usual focusPrimaryInput() auto-select behavior stealing the selection.
+  function captureActiveInputState(){
+    const el = document.activeElement;
+    if (!el || !el.id) return null;
+    if (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA") return null;
+    // Reading selectionStart/End throws on input types that don't support text selection
+    // (number, date, email, etc. — only text/search/url/tel/password/textarea do), so this
+    // is wrapped defensively; losing just the caret position is harmless, but an uncaught
+    // throw here would happen mid-subscribe-callback and break live sync entirely.
+    let selStart = null, selEnd = null;
+    try { selStart = (typeof el.selectionStart === "number") ? el.selectionStart : null; } catch(e){}
+    try { selEnd = (typeof el.selectionEnd === "number") ? el.selectionEnd : null; } catch(e){}
+    return { id: el.id, value: el.value, selStart: selStart, selEnd: selEnd };
+  }
+  function restoreActiveInputState(state){
+    if (!state) return;
+    const el = document.getElementById(state.id);
+    if (!el || (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA")) return;
+    try {
+      el.value = state.value;
+      el.focus();
+      if (state.selStart != null && typeof el.setSelectionRange === "function") {
+        el.setSelectionRange(state.selStart, state.selEnd != null ? state.selEnd : state.selStart);
+      }
+    } catch(e){}
+  }
   function render(){
     const app = document.getElementById("app");
     if (!stateConfirmed) {
@@ -1596,8 +1655,13 @@
     }
     if (toastMsg) html += '<div class="toast">'+escapeHtml(toastMsg)+'</div>';
     html += standupOverlayHtml();
+    const scrollState = captureScrollState();
+    const quiet = suppressFocusSteal;
+    const activeState = quiet ? captureActiveInputState() : null;
     app.innerHTML = html;
-    focusPrimaryInput();
+    restoreScrollState(scrollState);
+    if (activeState) restoreActiveInputState(activeState);
+    else focusPrimaryInput();
   }
   function focusPrimaryInput(){
     requestAnimationFrame(function(){
@@ -1855,7 +1919,7 @@
       '<div class="kiosk-sub">Choose the task you just worked on.</div>'+
       taskShortcutsSection(owner)+
       '<div class="kiosk-body">'+
-        '<div class="card" style="max-height:320px;overflow-y:auto;text-align:left;padding:4px;">'+listRows+'</div>'+
+        '<div class="card" id="taskPickerList" data-scroll-keep style="max-height:320px;overflow-y:auto;text-align:left;padding:4px;">'+listRows+'</div>'+
         '<button class="btn btn-primary" onclick="App.pickTask()"'+(selectedId?'':' disabled')+'>Next</button>'+
         switchLink+
       '</div>'+
