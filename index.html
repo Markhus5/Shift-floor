@@ -1406,12 +1406,13 @@
     const modal = document.createElement("div");
     modal.className = "modal-backdrop";
     modal.style.zIndex = "60";
+    if (opts.topAligned) { modal.style.alignItems = "flex-start"; modal.style.paddingTop = "6px"; }
     modal.innerHTML =
-      '<div class="card modal" style="max-width:420px;text-align:center;">'+
+      '<div class="card modal" style="max-width:420px;text-align:center;'+(opts.topAligned?'padding-top:14px;':'')+'">'+
         '<h3 style="margin-bottom:10px;">'+escapeHtml(opts.title||"Scan Serial Numbers")+'</h3>'+
         '<div id="camScanCount" style="font-weight:700;margin-bottom:10px;">Scanned 0'+(opts.targetCount!=null?(' of '+opts.targetCount):'')+'</div>'+
         '<div id="camScanVideoWrap" style="position:relative;border-radius:12px;overflow:hidden;background:#000;min-height:220px;display:flex;align-items:center;justify-content:center;">'+
-          '<video id="camScanVideo" playsinline autoplay muted style="width:100%;max-height:320px;display:block;"></video>'+
+          '<video id="camScanVideo" playsinline autoplay muted style="width:100%;max-height:'+(opts.topAligned?'260px':'320px')+';display:block;"></video>'+
           '<div id="camScanFlash" style="position:absolute;inset:0;background:var(--good);opacity:0;pointer-events:none;"></div>'+
         '</div>'+
         '<div id="camScanMsg" style="color:var(--muted);font-size:13px;margin-top:10px;"></div>'+
@@ -1747,6 +1748,7 @@
   }
   function focusPrimaryInput(){
     requestAnimationFrame(function(){
+      if (cameraScan) return; // never pop the on-screen keyboard over an open camera
       const el = document.querySelector('[data-autofocus="1"]');
       if (!el) return;
       try {
@@ -2400,6 +2402,34 @@
     } catch(e){}
     try { if (navigator.vibrate) navigator.vibrate([200,100,200]); } catch(e){}
   }
+  // Soft, short confirmation tick after a code is successfully recorded (camera, typed or
+  // Bluetooth scanner) so the operator gets an audible acknowledgement.
+  // Browsers only allow audio after a user gesture; call this from the Camera tap so later
+  // automatic (camera-detected) scans can beep.
+  function playSoftBeepPrime(){
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch(e){}
+  }
+  function playSoftBeep(){
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = 1400;
+      const t0 = audioCtx.currentTime;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.12, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0); o.stop(t0 + 0.16);
+    } catch(e){}
+  }
   function scanAddItem(listId, code, rep){
     const l = findScanList(listId);
     if (!l) return false;
@@ -2408,6 +2438,7 @@
     l.items.push({ id: uid("si"), code: code, ts: new Date().toISOString(), rep: rep });
     l.updatedAt = new Date().toISOString();
     persist(true, null, null, true);
+    playSoftBeep();
     render();
     return true;
   }
@@ -4156,7 +4187,9 @@
       const id = ui.scanListId;
       const l = findScanList(id);
       if (!l || !canEditScanList(l)) return;
-      openCameraScan({ title:"Scan Barcodes", anyFormat:true,
+      try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch(e){}
+      playSoftBeepPrime();
+      openCameraScan({ title:"Scan Barcodes", anyFormat:true, topAligned:true,
         getCount:function(){ const x = findScanList(id); return x ? (x.items||[]).length : 0; },
         feed:function(code){ scanListFeed(id, code); } });
       const c = cameraScan && cameraScan.modalEl && cameraScan.modalEl.querySelector("#camScanCount");
