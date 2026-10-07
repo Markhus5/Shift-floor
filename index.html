@@ -617,6 +617,7 @@
       headlineTaskId: null,
       serialTaskId: null,
       serials: [],
+      scanLists: [],
       serialFormats: DEFAULT_SERIAL_FORMATS.map(function(f){ return Object.assign({}, f); }),
       finalAssySeedTag: null,
       reassignUntil: null,
@@ -727,6 +728,7 @@
     STATE.workers.forEach(function(w){
       if (!Array.isArray(w.pinnedTasks)) { w.pinnedTasks = []; changed = true; }
     });
+    if (!STATE.scanLists) { STATE.scanLists = []; changed = true; }
     if (!STATE.entries) { STATE.entries = []; changed = true; }
     STATE.entries.forEach(function(e){
       // Fix 3 (backdating): every entry needs a date-only entryDate it's attributed to,
@@ -1218,7 +1220,11 @@
     clearTimeout(retryTimer);
     retryTimer = setTimeout(function(){ persist(true); }, 6000*retryCount);
   }
-  function persist(silent, successMsg, failMsg){
+  let persistNeedsBackup = false, lastBackupAt = 0;
+  function persist(silent, successMsg, failMsg, light){
+    // light=true (barcode-scan saves): backup snapshots throttled to ~1/min so rapid scanning
+    // doesn't create a snapshot per scan. Any non-light save forces one.
+    if (!light) persistNeedsBackup = true; else if (!persistNeedsBackup) persistNeedsBackup = 'light';
     if (!stateConfirmed) {
       // Safety net: never let a stray save path write default/unconfirmed state
       // over whatever is really in Firestore before we've confirmed what that is.
@@ -1243,7 +1249,10 @@
         render();
         // Fire-and-forget: a failed backup snapshot should never affect the real save's
         // success/failure or the UI — it's purely an extra safety copy on the side.
-        if (dbApi.backupSnapshot) {
+        const needB = persistNeedsBackup;
+        const dueB = needB === true || (needB && Date.now() - lastBackupAt > 60000);
+        if (dueB) { persistNeedsBackup = false; lastBackupAt = Date.now(); }
+        if (dueB && dbApi.backupSnapshot) {
           dbApi.backupSnapshot(STATE).catch(function(e){ console.warn("Shift Floor: backup snapshot failed", e); });
         }
       } catch(err){
@@ -1330,7 +1339,7 @@
     if (cs.modalEl && cs.modalEl.parentNode) cs.modalEl.parentNode.removeChild(cs.modalEl);
   }
   function handleCameraCode(code){
-    if (!cameraScan) return;
+    if (!cameraScan || cameraScan.paused) return;
     const opts = cameraScan.opts;
     const prevCount = opts.getCount ? opts.getCount() : 0;
     opts.feed(code);
@@ -1360,7 +1369,7 @@
     modal.style.zIndex = "60";
     modal.innerHTML =
       '<div class="card modal" style="max-width:420px;text-align:center;">'+
-        '<h3 style="margin-bottom:10px;">Scan Serial Numbers</h3>'+
+        '<h3 style="margin-bottom:10px;">'+escapeHtml(opts.title||"Scan Serial Numbers")+'</h3>'+
         '<div id="camScanCount" style="font-weight:700;margin-bottom:10px;">Scanned 0'+(opts.targetCount!=null?(' of '+opts.targetCount):'')+'</div>'+
         '<div id="camScanVideoWrap" style="position:relative;border-radius:12px;overflow:hidden;background:#000;min-height:220px;display:flex;align-items:center;justify-content:center;">'+
           '<video id="camScanVideo" playsinline autoplay muted style="width:100%;max-height:320px;display:block;"></video>'+
@@ -1391,7 +1400,7 @@
       video.play().catch(function(){});
       let detector;
       try {
-        detector = new BarcodeDetector({ formats:["code_128","code_39","ean_13","qr_code","upc_a","upc_e"] });
+        detector = opts.anyFormat ? new BarcodeDetector() : new BarcodeDetector({ formats:["code_128","code_39","ean_13","qr_code","upc_a","upc_e"] });
       } catch(e){ unsupported(); return; }
       function loop(){
         if (!cameraScan || cameraScan.modalEl !== modal) return;
@@ -1689,7 +1698,9 @@
     if (toastMsg) html += '<div class="toast">'+escapeHtml(toastMsg)+'</div>';
     html += standupOverlayHtml();
     const scrollState = captureScrollState();
-    const activeState = quiet ? captureActiveInputState() : null;
+    let activeState = null;
+    { const ae = document.activeElement;
+      if (quiet || (ae && ae.getAttribute && ae.getAttribute("data-keepfocus"))) activeState = captureActiveInputState(); }
     app.innerHTML = html;
     restoreScrollState(scrollState);
     if (activeState) restoreActiveInputState(activeState);
@@ -1808,6 +1819,8 @@
       case "scanSerials": return kioskShell(scanSerialsBody());
       case "logFaultBoard": return kioskShell(logFaultBoardBody());
       case "retestBoard": return kioskShell(retestBoardBody());
+      case "scanLists": return scanShell(scanListsIndexHtml());
+      case "scanList": return scanShell(scanListDetailHtml());
       case "askAnother": return kioskShell(askAnotherBody());
       default: return kioskShell(confirmOwnerBody(assignedId));
     }
@@ -1847,6 +1860,7 @@
         '<button class="btn btn-primary" onclick="App.goto(\'pickTask\')">Yes, that’s me</button>'+
         '<button class="btn btn-ghost" onclick="App.changeOwner()">Not me — change worker</button>'+
         '<button class="link-btn" onclick="App.goto(\'retestBoard\')">Retest a board</button>'+
+        '<button class="link-btn" onclick="App.gotoScanLists()">📦 Barcode Scanner</button>'+
       '</div>'
     );
   }
@@ -1953,6 +1967,7 @@
       '<div class="kiosk-body">'+
         '<div class="card" id="taskPickerList" data-scroll-keep style="max-height:320px;overflow-y:auto;text-align:left;padding:4px;">'+listRows+'</div>'+
         '<button class="btn btn-primary" onclick="App.pickTask()"'+(selectedId?'':' disabled')+'>Next</button>'+
+        '<button class="btn btn-ghost" onclick="App.gotoScanLists()">📦 Barcode Scanner</button>'+
         switchLink+
       '</div>'+
       myEntriesSection(owner)
@@ -2256,6 +2271,267 @@
   }
 
   /* ---------------- manager dashboard ---------------- */
+  /* ---------------- Barcode Scanner (free-form scan lists) ----------------
+     Deliberately EXEMPT from serial-number format rules: any code the reader returns is
+     accepted as-is. Lists live in STATE.scanLists. Each item: { id, code, ts, rep }.
+     rep = number of copies of that code already recorded anywhere (across ALL lists) at the
+     moment it was recorded; 0 = first recording, shown plain; 1 -> "(1)", 2 -> "(2)", ... */
+  function scanLists(){ if (!STATE.scanLists) STATE.scanLists = []; return STATE.scanLists; }
+  function findScanList(id){ return scanLists().find(function(l){ return l.id===id; }); }
+  function scanOwnerName(l){
+    if (l.ownerType === "manager") {
+      const m = (STATE.managers||[]).find(function(x){ return x.id===l.ownerId; });
+      return m ? m.name : "Manager";
+    }
+    const w = findWorker(l.ownerId);
+    return w ? w.name : "Unknown";
+  }
+  function scanIsManagerView(){ return getDeviceMode() === "manager"; }
+  function scanListsVisible(){
+    if (scanIsManagerView()) return scanLists().slice();
+    const me = getAssignedWorkerId();
+    return scanLists().filter(function(l){ return l.ownerType==="worker" && l.ownerId===me; });
+  }
+  function canEditScanList(l){
+    if (!l) return false;
+    if (scanIsManagerView()) return !!getMgrIdentity();
+    return l.ownerType==="worker" && l.ownerId===getAssignedWorkerId();
+  }
+  function scanItemLabel(it){ return it.code + (it.rep>0 ? " ("+it.rep+")" : ""); }
+  function scanCodeOccurrences(code, exceptItemId){
+    let n = 0;
+    scanLists().forEach(function(l){
+      (l.items||[]).forEach(function(it){ if (it.code === code && it.id !== exceptItemId) n++; });
+    });
+    return n;
+  }
+  function scanDoubleCount(l){ return (l.items||[]).filter(function(it){ return it.rep>0; }).length; }
+  function scanWhereText(code){
+    const seen = [], parts = [];
+    scanLists().forEach(function(l){
+      if ((l.items||[]).some(function(it){ return it.code===code; }) && seen.indexOf(l.id)<0) {
+        seen.push(l.id);
+        parts.push(scanOwnerName(l)+"’s list “"+(l.title||"Untitled")+"”");
+      }
+    });
+    if (parts.length > 3) return parts.slice(0,3).join("; ")+" and "+(parts.length-3)+" more";
+    return parts.join("; ");
+  }
+  let audioCtx = null;
+  function playBeep(){
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) {
+        if (!audioCtx) audioCtx = new AC();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        [0, 0.28].forEach(function(delay){
+          const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+          o.type = "square"; o.frequency.value = 880;
+          g.gain.value = 0.25;
+          o.connect(g); g.connect(audioCtx.destination);
+          const t0 = audioCtx.currentTime + delay;
+          o.start(t0); o.stop(t0 + 0.2);
+        });
+      }
+    } catch(e){}
+    try { if (navigator.vibrate) navigator.vibrate([200,100,200]); } catch(e){}
+  }
+  function scanAddItem(listId, code, rep){
+    const l = findScanList(listId);
+    if (!l) return false;
+    if (!l.items) l.items = [];
+    l.items.push({ id: uid("si"), code: code, ts: new Date().toISOString(), rep: rep });
+    l.updatedAt = new Date().toISOString();
+    persist(true, null, null, true);
+    render();
+    return true;
+  }
+  // Single entry point for camera / typed / Bluetooth-scanner input.
+  function scanListFeed(listId, rawCode){
+    const code = String(rawCode||"").replace(/[\r\n\t]+/g," ").trim();
+    if (!code) return;
+    const l = findScanList(listId);
+    if (!l || !canEditScanList(l)) return;
+    if (ui.scanDup && ui.scanDup.listId === listId) { playBeep(); return; } // decision pending
+    const occ = scanCodeOccurrences(code);
+    if (occ === 0) { scanAddItem(listId, code, 0); return; }
+    playBeep();
+    const dup = { listId:listId, code:code, where:scanWhereText(code) };
+    setUi({ scanDup: dup });
+    showCameraDupAlert(dup);
+  }
+  function showCameraDupAlert(dup){
+    if (!cameraScan || !cameraScan.modalEl) return;
+    cameraScan.paused = true;
+    const card = cameraScan.modalEl.querySelector(".modal");
+    if (!card) return;
+    const old = cameraScan.modalEl.querySelector("#camDupAlert");
+    if (old) old.parentNode.removeChild(old);
+    const box = document.createElement("div");
+    box.id = "camDupAlert";
+    box.style.cssText = "background:var(--bad-soft);border:2px solid var(--bad);color:var(--bad);border-radius:12px;padding:12px;margin-top:12px;text-align:left;";
+    box.innerHTML =
+      '<div style="font-weight:800;">Already scanned: '+escapeHtml(dup.code)+'</div>'+
+      '<div style="font-size:13px;margin:4px 0 10px;">Found in '+escapeHtml(dup.where)+'.</div>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;">'+
+        '<button class="btn btn-primary" style="flex:1;" onclick="App.scanDupAllow()">Allow this time &amp; record it</button>'+
+        '<button class="btn btn-ghost" style="flex:1;" onclick="App.scanDupCancel()">Cancel</button>'+
+      '</div>';
+    card.appendChild(box);
+  }
+  function hideCameraDupAlert(){
+    if (!cameraScan || !cameraScan.modalEl) return;
+    const box = cameraScan.modalEl.querySelector("#camDupAlert");
+    if (box && box.parentNode) box.parentNode.removeChild(box);
+    cameraScan.paused = false;
+    cameraScan.lastCodeAt = Date.now(); // give the user a moment to move the camera away
+    const l = ui.scanListId ? findScanList(ui.scanListId) : null;
+    const countEl = cameraScan.modalEl.querySelector("#camScanCount");
+    if (countEl && l) countEl.textContent = "Scanned "+(l.items||[]).length;
+  }
+  function scanListCopyText(l){
+    function flat(s){ return String(s||"").replace(/[\r\n\t]+/g," ").trim(); }
+    const items = l.items || [];
+    const d = new Date(l.createdAt);
+    const lines = [];
+    lines.push(flat(l.title) || "Untitled");
+    if (flat(l.notes)) lines.push(flat(l.notes));
+    lines.push("Owner: "+scanOwnerName(l)+" · "+fmtDateShort(d)+" "+d.getFullYear());
+    lines.push("Total recorded: "+items.length+" ("+scanDoubleCount(l)+" double-scanned)");
+    lines.push("");
+    lines.push("No.\tBarcode\tRepeat");
+    items.forEach(function(it, i){
+      lines.push((i+1)+"\t"+flat(it.code)+"\t"+(it.rep>0 ? "("+it.rep+")" : ""));
+    });
+    return lines.join("\n");
+  }
+  function copyTextToClipboard(text, okMsg){
+    function done(){ showToast(okMsg); }
+    function fail(){
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        done();
+      } catch(e){ showToast("Could not copy — select the list and copy manually."); }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(fail);
+    else fail();
+  }
+  function scanShell(inner){
+    return '<div class="kiosk"><div class="card kiosk-card" style="max-width:680px;text-align:left;">'+inner+'</div></div>';
+  }
+  function scanBackAction(){ return scanIsManagerView() ? "App.gotoManager('dashboard')" : "App.goto('pickTask')"; }
+  function scanListsIndexHtml(){
+    const mgr = scanIsManagerView();
+    let lists = scanListsVisible();
+    let filterHtml = "";
+    if (mgr) {
+      const owners = [], seen = {};
+      scanLists().forEach(function(l){
+        const k = l.ownerType+":"+l.ownerId;
+        if (!seen[k]) { seen[k] = 1; owners.push({ key:k, name:scanOwnerName(l) }); }
+      });
+      const cur = ui.scanFilterOwner || "";
+      filterHtml = '<select id="scanFilterSel" onchange="App.setScanFilterOwner(this.value)" style="padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:13px;margin-bottom:10px;">'+
+        '<option value="">All owners</option>'+
+        owners.map(function(o){ return '<option value="'+escapeHtml(o.key)+'"'+(cur===o.key?' selected':'')+'>'+escapeHtml(o.name)+'</option>'; }).join("")+
+        '</select>';
+      if (cur) lists = lists.filter(function(l){ return (l.ownerType+":"+l.ownerId)===cur; });
+    }
+    lists.sort(function(a,b){ return new Date(b.updatedAt||b.createdAt) - new Date(a.updatedAt||a.createdAt); });
+    const rows = lists.length ? lists.map(function(l){
+      const n = (l.items||[]).length, dbl = scanDoubleCount(l);
+      return '<div class="list-row">'+
+        '<div style="min-width:0;"><div style="font-weight:700;">'+escapeHtml(l.title||"Untitled")+'</div>'+
+          '<div style="font-size:12px;color:var(--muted);">'+(mgr?escapeHtml(scanOwnerName(l))+' · ':'')+n+' scanned'+(dbl?(' · '+dbl+' double-scanned'):'')+' · '+escapeHtml(fmtRelTime(l.updatedAt||l.createdAt))+'</div></div>'+
+        '<div class="actions"><button class="chip-btn" onclick="App.copyScanList(\''+l.id+'\')">Copy</button> <button class="chip-btn" onclick="App.openScanList(\''+l.id+'\')">Open</button></div>'+
+      '</div>';
+    }).join("") : '<div style="color:var(--muted);padding:12px 4px;">No scan lists yet.</div>';
+    return (
+      '<div class="kiosk-eyebrow">Barcode Scanner</div>'+
+      '<div class="kiosk-title" style="text-align:left;">'+(mgr?'All scan lists':'My scan lists')+'</div>'+
+      '<div class="kiosk-body" style="align-items:stretch;">'+
+        filterHtml+
+        '<button class="btn btn-primary" onclick="App.newScanList()">+ New list</button>'+
+        '<div class="card" style="padding:4px;max-height:420px;overflow-y:auto;" id="scanIndexList" data-scroll-keep>'+rows+'</div>'+
+        '<button class="link-btn" onclick="'+scanBackAction()+'">← Back</button>'+
+      '</div>'
+    );
+  }
+  function scanListDetailHtml(){
+    const l = findScanList(ui.scanListId);
+    const visible = l && scanListsVisible().some(function(x){ return x.id===l.id; });
+    if (!l || !visible) return scanListsIndexHtml();
+    const edit = canEditScanList(l);
+    const items = l.items || [];
+    const dbl = scanDoubleCount(l);
+    const dup = (ui.scanDup && ui.scanDup.listId===l.id) ? ui.scanDup : null;
+    const scannerMode = (function(){ try { return localStorage.getItem("td_scannerMode")==="1"; } catch(e){ return false; } })();
+    const dupBox = dup ? (
+      '<div id="scanDupBox" style="background:var(--bad-soft);border:2px solid var(--bad);color:var(--bad);border-radius:12px;padding:12px;margin-bottom:12px;">'+
+        '<div style="font-weight:800;">⚠ Already scanned: '+escapeHtml(dup.code)+'</div>'+
+        '<div style="font-size:13px;margin:4px 0 10px;">Found in '+escapeHtml(dup.where)+'.</div>'+
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;">'+
+          '<button class="btn btn-primary" style="flex:1;" onclick="App.scanDupAllow()">Allow this time &amp; record it</button>'+
+          '<button class="btn btn-ghost" style="flex:1;" onclick="App.scanDupCancel()">Cancel</button>'+
+        '</div>'+
+      '</div>') : "";
+    const fieldStyle = 'width:100%;padding:10px 12px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:15px;box-sizing:border-box;';
+    const metaHtml = edit ? (
+      '<label style="font-size:12px;color:var(--muted);">Title</label>'+
+      '<input type="text" id="scanTitleInput" data-keepfocus="1" value="'+escapeHtml(l.title||"")+'" onchange="App.saveScanListMeta()" style="'+fieldStyle+'margin-bottom:8px;">'+
+      '<label style="font-size:12px;color:var(--muted);">Notes</label>'+
+      '<textarea id="scanNotesInput" data-keepfocus="1" rows="2" onchange="App.saveScanListMeta()" style="'+fieldStyle+'margin-bottom:12px;">'+escapeHtml(l.notes||"")+'</textarea>'
+    ) : (
+      '<div style="font-weight:800;font-size:18px;">'+escapeHtml(l.title||"Untitled")+'</div>'+
+      (l.notes?'<div style="color:var(--muted);margin:4px 0 12px;white-space:pre-wrap;">'+escapeHtml(l.notes)+'</div>':'')
+    );
+    const scanBar = edit ? (
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">'+
+        '<button class="btn btn-primary" style="flex:0 0 auto;" onclick="App.openCameraForScanList()">📷 Camera</button>'+
+        '<input type="text" id="scanCodeInput" data-autofocus="1" data-keepfocus="1" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Scan or type a code, then Enter"'+(scannerMode?' inputmode="none"':'')+' onkeydown="if(event.key===\'Enter\'||event.key===\'Tab\'){event.preventDefault();App.addScanCode();}" style="'+fieldStyle+'flex:1;min-width:180px;width:auto;">'+
+        '<button class="btn btn-ghost" style="flex:0 0 auto;" onclick="App.addScanCode()">Add</button>'+
+      '</div>'+
+      '<label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;margin-bottom:12px;"><input type="checkbox" '+(scannerMode?'checked ':'')+'onchange="App.toggleScannerMode(this.checked)"> Bluetooth scanner mode (hides the on-screen keyboard; scanner types into the box)</label>'
+    ) : "";
+    const editing = ui.scanEditItemId || null;
+    const rows = items.slice().reverse().map(function(it){
+      const idx = items.indexOf(it) + 1;
+      const isEditing = editing === it.id;
+      const confirmRm = ui.scanRemoveItemId === it.id;
+      let mid;
+      if (isEditing) {
+        mid = '<input type="text" id="scanEditInput" data-keepfocus="1" value="'+escapeHtml(it.code)+'" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.saveScanItemEdit(\''+it.id+'\');}" style="'+fieldStyle+'padding:6px 8px;">';
+      } else {
+        mid = '<div style="font-family:ui-monospace,Menlo,monospace;word-break:break-all;">'+escapeHtml(scanItemLabel(it))+'</div>';
+      }
+      let acts = "";
+      if (edit) {
+        if (isEditing) acts = '<button class="chip-btn" onclick="App.saveScanItemEdit(\''+it.id+'\')">Save</button> <button class="chip-btn" onclick="App.cancelScanItemEdit()">Cancel</button>';
+        else if (confirmRm) acts = '<button class="chip-btn" style="color:var(--bad);" onclick="App.removeScanItem(\''+it.id+'\')">Confirm remove</button> <button class="chip-btn" onclick="App.cancelRemoveScanItem()">Keep</button>';
+        else acts = '<button class="chip-btn" title="Edit" onclick="App.editScanItem(\''+it.id+'\')">✎</button> <button class="chip-btn" title="Remove" onclick="App.askRemoveScanItem(\''+it.id+'\')">✕</button>';
+      }
+      return '<div class="list-row"'+(it.rep>0?' style="background:var(--bad-soft);"':'')+'><div style="display:flex;gap:10px;align-items:center;min-width:0;flex:1;"><span style="color:var(--muted);min-width:34px;text-align:right;">'+idx+'.</span>'+mid+'</div><div class="actions">'+acts+'</div></div>';
+    }).join("") || '<div style="color:var(--muted);padding:12px 4px;">Nothing scanned yet.</div>';
+    const delHtml = edit ? (ui.scanDeleteConfirm===l.id
+      ? '<div style="margin-top:12px;color:var(--bad);">Delete this whole list (and its '+items.length+' item(s))? <button class="btn btn-primary" style="background:var(--bad);" onclick="App.deleteScanList()">Yes, delete</button> <button class="btn btn-ghost" onclick="App.cancelDeleteScanList()">Keep</button></div>'
+      : '<button class="link-btn" style="color:var(--bad);" onclick="App.askDeleteScanList()">Delete this list</button>') : "";
+    return (
+      '<div class="kiosk-eyebrow">Barcode Scanner · '+escapeHtml(scanOwnerName(l))+'</div>'+
+      '<div class="kiosk-body" style="align-items:stretch;">'+
+        '<button class="link-btn" style="align-self:flex-start;margin:0;" onclick="App.closeScanList()">← All lists</button>'+
+        dupBox+metaHtml+scanBar+
+        '<div style="font-weight:700;margin:6px 0;">Total recorded: '+items.length+' <span style="font-weight:500;color:'+(dbl?'var(--bad)':'var(--muted)')+';">· '+dbl+' double-scanned</span></div>'+
+        '<div class="card" id="scanItemsList" data-scroll-keep style="padding:4px;max-height:360px;overflow-y:auto;">'+rows+'</div>'+
+        '<button class="btn btn-primary" onclick="App.copyScanList(\''+l.id+'\')">Copy list (title, notes &amp; 3 columns)</button>'+
+        delHtml+
+      '</div>'
+    );
+  }
+
   function renderManager(){
     if (!getMgrIdentity()) return kioskShell(pinBody());
     const screen = ui.mScreen || "dashboard";
@@ -2271,6 +2547,8 @@
     else if (screen === "about") body = managerAboutPanel();
     else if (screen === "faultlog") body = managerFaultLogPanel();
     else if (screen === "backups") body = managerBackupsPanel();
+    else if (screen === "scanlists") body = '<div class="shell-scan">'+scanShell(scanListsIndexHtml())+'</div>';
+    else if (screen === "scanlist") body = '<div class="shell-scan">'+scanShell(scanListDetailHtml())+'</div>';
     else body = managerDashboardBody();
 
     let modal = "";
@@ -2716,6 +2994,7 @@
           '<button onclick="App.gotoManager(\'workers\')">Manage Workers</button>'+
           '<button onclick="App.gotoManager(\'settings\')">Settings</button>'+
           '<button onclick="App.gotoManager(\'faultlog\')">Fault Log</button>'+
+          '<button onclick="App.gotoManager(\'scanlists\')">📦 Barcode Scanner</button>'+
           '<button onclick="App.gotoManager(\'backups\')">Backups</button>'+
           '<button onclick="App.gotoManager(\'about\')">About</button>'+
           '<button onclick="App.openModal(\'reassign\')">🔓 Open Reassignment Window</button>'+
@@ -3711,6 +3990,120 @@
       else setUi({ pinError:true });
     },
     logoutManager: function(){ setMgrIdentity(null); setUi({ mScreen:"dashboard" }); },
+    /* ---- Barcode Scanner actions ---- */
+    newScanList: function(){
+      const mgr = scanIsManagerView();
+      const ownerId = mgr ? getMgrIdentity() : getAssignedWorkerId();
+      if (!ownerId) return;
+      const now = new Date();
+      const l = { id: uid("sl"), title: "Scan list "+fmtDateShort(now)+" "+pad2(now.getHours())+":"+pad2(now.getMinutes()), notes:"",
+        ownerType: mgr?"manager":"worker", ownerId: ownerId, createdAt: now.toISOString(), updatedAt: now.toISOString(), items:[] };
+      scanLists().push(l);
+      persist(true, null, null, true);
+      App.openScanList(l.id);
+    },
+    openScanList: function(id){
+      if (scanIsManagerView()) setUi({ mScreen:"scanlist", scanListId:id, scanDup:null, scanEditItemId:null, scanRemoveItemId:null, scanDeleteConfirm:null });
+      else setUi({ screen:"scanList", scanListId:id, scanDup:null, scanEditItemId:null, scanRemoveItemId:null, scanDeleteConfirm:null });
+    },
+    closeScanList: function(){
+      closeCameraScan();
+      if (scanIsManagerView()) setUi({ mScreen:"scanlists", scanListId:null, scanDup:null });
+      else setUi({ screen:"scanLists", scanListId:null, scanDup:null });
+    },
+    gotoScanLists: function(){
+      if (scanIsManagerView()) setUi({ mScreen:"scanlists", scanListId:null, scanDup:null });
+      else setUi({ screen:"scanLists", scanListId:null, scanDup:null });
+    },
+    setScanFilterOwner: function(v){ setUi({ scanFilterOwner:v }); },
+    saveScanListMeta: function(){
+      const l = findScanList(ui.scanListId);
+      if (!l || !canEditScanList(l)) return;
+      const t = document.getElementById("scanTitleInput"), n = document.getElementById("scanNotesInput");
+      if (t) l.title = t.value.trim() || "Untitled";
+      if (n) l.notes = n.value;
+      l.updatedAt = new Date().toISOString();
+      persist(true, null, null, true);
+    },
+    addScanCode: function(){
+      const el = document.getElementById("scanCodeInput");
+      if (!el) return;
+      const v = el.value;
+      el.value = "";
+      scanListFeed(ui.scanListId, v);
+    },
+    scanDupAllow: function(){
+      const d = ui.scanDup;
+      if (!d) return;
+      const rep = Math.max(1, scanCodeOccurrences(d.code));
+      setUi({ scanDup:null });
+      hideCameraDupAlert();
+      scanAddItem(d.listId, d.code, rep);
+      hideCameraDupAlert();
+    },
+    scanDupCancel: function(){
+      setUi({ scanDup:null });
+      hideCameraDupAlert();
+    },
+    openCameraForScanList: function(){
+      const id = ui.scanListId;
+      const l = findScanList(id);
+      if (!l || !canEditScanList(l)) return;
+      openCameraScan({ title:"Scan Barcodes", anyFormat:true,
+        getCount:function(){ const x = findScanList(id); return x ? (x.items||[]).length : 0; },
+        feed:function(code){ scanListFeed(id, code); } });
+      const c = cameraScan && cameraScan.modalEl && cameraScan.modalEl.querySelector("#camScanCount");
+      if (c) c.textContent = "Scanned "+(l.items||[]).length;
+    },
+    toggleScannerMode: function(on){
+      try { localStorage.setItem("td_scannerMode", on?"1":"0"); } catch(e){}
+      render();
+    },
+    editScanItem: function(id){ setUi({ scanEditItemId:id, scanRemoveItemId:null }); },
+    cancelScanItemEdit: function(){ setUi({ scanEditItemId:null }); },
+    saveScanItemEdit: function(id){
+      const l = findScanList(ui.scanListId);
+      if (!l || !canEditScanList(l)) return;
+      const it = (l.items||[]).find(function(x){ return x.id===id; });
+      const el = document.getElementById("scanEditInput");
+      if (!it || !el) return;
+      const v = el.value.replace(/[\r\n\t]+/g," ").trim();
+      if (!v) { showToast("Code can’t be empty."); return; }
+      if (v !== it.code) {
+        it.code = v;
+        // Re-number: the edited item becomes the (n)th recording of its new code.
+        it.rep = scanCodeOccurrences(v, it.id);
+        l.updatedAt = new Date().toISOString();
+        persist(true, null, null, true);
+      }
+      setUi({ scanEditItemId:null });
+    },
+    askRemoveScanItem: function(id){ setUi({ scanRemoveItemId:id, scanEditItemId:null }); },
+    cancelRemoveScanItem: function(){ setUi({ scanRemoveItemId:null }); },
+    removeScanItem: function(id){
+      const l = findScanList(ui.scanListId);
+      if (!l || !canEditScanList(l)) return;
+      l.items = (l.items||[]).filter(function(x){ return x.id!==id; });
+      l.updatedAt = new Date().toISOString();
+      persist(true, null, null, true);
+      setUi({ scanRemoveItemId:null });
+    },
+    askDeleteScanList: function(){ setUi({ scanDeleteConfirm: ui.scanListId }); },
+    cancelDeleteScanList: function(){ setUi({ scanDeleteConfirm:null }); },
+    deleteScanList: function(){
+      const l = findScanList(ui.scanListId);
+      if (!l || !canEditScanList(l)) return;
+      STATE.scanLists = scanLists().filter(function(x){ return x.id!==l.id; });
+      persist(true, "List deleted.", null, true);
+      closeCameraScan();
+      if (scanIsManagerView()) setUi({ mScreen:"scanlists", scanListId:null, scanDeleteConfirm:null });
+      else setUi({ screen:"scanLists", scanListId:null, scanDeleteConfirm:null });
+    },
+    copyScanList: function(id){
+      const l = findScanList(id);
+      if (!l) return;
+      copyTextToClipboard(scanListCopyText(l), "Copied “"+(l.title||"Untitled")+"” ("+(l.items||[]).length+" item(s)).");
+    },
     gotoManager: function(screen){
       setUi({ mScreen:screen });
       if (screen === "backups" && !backupsListCache && !backupsListLoading) loadBackupsList();
