@@ -345,6 +345,11 @@
       // before it happened via the manager-facing Backups panel.
       const backupsCol = collection(db, "shiftfloor_backups");
 
+      // Who/what device is making this save — stamped on the live doc and every backup so a
+      // bad save can be traced. Info comes from the main script; never throws.
+      function sfWriter(){
+        try { return window.ShiftFloorWriterInfo ? window.ShiftFloorWriterInfo() : null; } catch(e){ return null; }
+      }
       window.ShiftFloorDB = {
         // cb(stateObjOrNull) — called once with current data (or null if no doc yet exists),
         // then again on every remote change.
@@ -359,6 +364,7 @@
             const fromCache = !!(snap.metadata && snap.metadata.fromCache);
             if (!snap.exists()) { cb(null, fromCache); return; }
             const data = snap.data();
+            if (!fromCache && data && data.updatedAt) window.__sfLastSeenUpdatedAt = data.updatedAt;
             try {
               cb(data && data.state ? JSON.parse(data.state) : data, fromCache);
             } catch(e){
@@ -371,7 +377,7 @@
         },
         // save(stateObj) -> Promise
         save: function(stateObj){
-          return setDoc(stateRef, { state: JSON.stringify(stateObj), updatedAt: Date.now() });
+          return setDoc(stateRef, { state: JSON.stringify(stateObj), updatedAt: Date.now(), writer: sfWriter() });
         },
         // backupSnapshot(stateObj) -> Promise: writes a new, independent timestamped copy
         // of the given state. Fire-and-forget from the main script's perspective — a
@@ -380,6 +386,7 @@
           return addDoc(backupsCol, {
             state: JSON.stringify(stateObj),
             createdAt: Date.now(),
+            writer: sfWriter(),
             entryCount: (stateObj && Array.isArray(stateObj.entries)) ? stateObj.entries.length : 0
           });
         },
@@ -389,7 +396,7 @@
           return getDocs(query(backupsCol, orderBy("createdAt","desc"), limit(max||500))).then(function(snap){
             return snap.docs.map(function(d){
               const data = d.data();
-              return { id: d.id, createdAt: data.createdAt, entryCount: data.entryCount||0 };
+              return { id: d.id, createdAt: data.createdAt, entryCount: data.entryCount||0, writer: data.writer||null };
             });
           });
         },
@@ -713,6 +720,38 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function(){ toastMsg = null; render(); }, 3200);
   }
+
+  /* ---------------- save stamp (who/which device wrote) ---------------- */
+  function getDeviceId(){
+    try {
+      let id = localStorage.getItem("td_deviceId");
+      if (!id) { id = Math.random().toString(36).slice(2,6); localStorage.setItem("td_deviceId", id); }
+      return id;
+    } catch(e){ return "????"; }
+  }
+  function deviceKindLabel(){
+    const ua = navigator.userAgent || "";
+    const os = /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? "iOS"
+      : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "Mac" : "Other";
+    const br = /CriOS|Chrome\//.test(ua) ? "Chrome" : /FxiOS|Firefox/.test(ua) ? "Firefox" : /Safari/.test(ua) ? "Safari" : "";
+    return os + (br ? " "+br : "");
+  }
+  window.ShiftFloorWriterInfo = function(){
+    const mode = getDeviceMode();
+    let who = "", name = "";
+    if (mode === "manager") {
+      const id = getMgrIdentity();
+      const m = (STATE && STATE.managers || []).find(function(x){ return x.id===id; });
+      who = "manager"; name = m ? m.name : (id || "");
+    } else {
+      const wid = getAssignedWorkerId();
+      const w = wid && STATE ? findWorker(wid) : null;
+      who = "worker tablet"; name = w ? w.name : "";
+    }
+    return { device:getDeviceId(), kind:deviceKindLabel(), mode:who, name:name,
+      lastSeen: window.__sfLastSeenUpdatedAt || null,
+      entries: (STATE && STATE.entries) ? STATE.entries.length : 0 };
+  };
 
   /* ---------------- migration ---------------- */
   function migrateState(){
@@ -1726,6 +1765,21 @@
     return '<span class="status-pill"><span class="status-dot '+dot+'"></span>'+label+'</span>';
   }
 
+  // Worker "Home": from any page after the task picker, abandon what's on screen and return
+  // to "What do you want to update?". Entry screens ask first; scan-list pages don't need to
+  // (they save as you go).
+  function workerHomeControl(mode){
+    if (mode !== "worker" || !getAssignedWorkerId()) return "";
+    const sc = ui.screen;
+    if (!sc || sc === "pickOwner" || sc === "confirmOwner" || sc === "pickTask") return "";
+    if (ui.homeAsk) {
+      return '<span style="display:inline-flex;gap:6px;align-items:center;font-size:13px;">Leave this page without saving? '+
+        '<button class="chip-btn danger" onclick="App.goHome()">Yes, go Home</button>'+
+        '<button class="chip-btn" onclick="App.cancelHome()">Stay</button></span>';
+    }
+    const direct = (sc === "scanLists" || sc === "scanList");
+    return '<button class="chip-btn" onclick="'+(direct ? 'App.goHome()' : 'App.askHome()')+'">🏠 Home</button>';
+  }
   function renderTopbar(mode){
     const other = mode === "manager" ? "worker" : "manager";
     const otherLabel = mode === "manager" ? "Switch to Worker view" : "Switch to Manager view";
@@ -1740,6 +1794,7 @@
           '<div style="font-size:12px;color:var(--muted);margin-top:-2px;">'+ (mode==="manager" ? "Manager Dashboard" : "Worker Update") + identityLine +'</div></div></div>'+
           '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'+
             statusPillHtml()+
+            workerHomeControl(mode)+
             '<button class="link-btn" style="margin:0;" onclick="App.toggleRecall()">🔔 Notices'+(noticeCount?(' ('+noticeCount+')'):'')+'</button>'+
             '<button class="link-btn" style="margin:0;" onclick="App.switchMode(\''+other+'\')">'+otherLabel+'</button>'+
           '</div>'+
@@ -2277,7 +2332,16 @@
      rep = number of copies of that code already recorded anywhere (across ALL lists) at the
      moment it was recorded; 0 = first recording, shown plain; 1 -> "(1)", 2 -> "(2)", ... */
   function scanLists(){ if (!STATE.scanLists) STATE.scanLists = []; return STATE.scanLists; }
-  function findScanList(id){ return scanLists().find(function(l){ return l.id===id; }); }
+  // A brand-new list lives only in memory (scanDraft) until the user actually records a code,
+  // types notes, or manually renames it — so opening "New list" and backing out leaves nothing.
+  let scanDraft = null;
+  function findScanList(id){
+    if (scanDraft && scanDraft.id === id) return scanDraft;
+    return scanLists().find(function(l){ return l.id===id; });
+  }
+  function scanPromoteDraft(l){
+    if (scanDraft && l === scanDraft) { scanLists().push(scanDraft); scanDraft = null; }
+  }
   function scanOwnerName(l){
     if (l.ownerType === "manager") {
       const m = (STATE.managers||[]).find(function(x){ return x.id===l.ownerId; });
@@ -2339,6 +2403,7 @@
   function scanAddItem(listId, code, rep){
     const l = findScanList(listId);
     if (!l) return false;
+    scanPromoteDraft(l);
     if (!l.items) l.items = [];
     l.items.push({ id: uid("si"), code: code, ts: new Date().toISOString(), rep: rep });
     l.updatedAt = new Date().toISOString();
@@ -2397,7 +2462,7 @@
     lines.push(flat(l.title) || "Untitled");
     if (flat(l.notes)) lines.push(flat(l.notes));
     lines.push("Owner: "+scanOwnerName(l)+" · "+fmtDateShort(d)+" "+d.getFullYear());
-    lines.push("Total recorded: "+items.length+" ("+scanDoubleCount(l)+" double-scanned)");
+    lines.push("Total recorded: "+items.length+(scanDoubleCount(l) ? " ("+scanDoubleCount(l)+" double-scanned)" : ""));
     lines.push("");
     lines.push("No.\tBarcode\tRepeat");
     items.forEach(function(it, i){
@@ -2424,6 +2489,10 @@
     return '<div class="kiosk"><div class="card kiosk-card" style="max-width:680px;text-align:left;">'+inner+'</div></div>';
   }
   function scanBackAction(){ return scanIsManagerView() ? "App.gotoManager('dashboard')" : "App.goto('pickTask')"; }
+  function scanTopBar(){
+    if (!scanIsManagerView()) return "";
+    return '<div style="margin-bottom:10px;"><button class="chip-btn" onclick="App.closeCameraAndDashboard()">← Back to dashboard</button></div>';
+  }
   function scanListsIndexHtml(){
     const mgr = scanIsManagerView();
     let lists = scanListsVisible();
@@ -2447,10 +2516,13 @@
       return '<div class="list-row">'+
         '<div style="min-width:0;"><div style="font-weight:700;">'+escapeHtml(l.title||"Untitled")+'</div>'+
           '<div style="font-size:12px;color:var(--muted);">'+(mgr?escapeHtml(scanOwnerName(l))+' · ':'')+n+' scanned'+(dbl?(' · '+dbl+' double-scanned'):'')+' · '+escapeHtml(fmtRelTime(l.updatedAt||l.createdAt))+'</div></div>'+
-        '<div class="actions"><button class="chip-btn" onclick="App.copyScanList(\''+l.id+'\')">Copy</button> <button class="chip-btn" onclick="App.openScanList(\''+l.id+'\')">Open</button></div>'+
+        '<div class="actions">'+(ui.scanIndexDeleteId===l.id
+          ? '<span style="color:var(--bad);font-size:13px;">Delete this list?</span> <button class="chip-btn danger" onclick="App.deleteScanFromIndex(\''+l.id+'\')">Yes, delete</button> <button class="chip-btn" onclick="App.cancelDeleteScanFromIndex()">Keep</button>'
+          : '<button class="chip-btn" onclick="App.copyScanList(\''+l.id+'\')">Copy</button> <button class="chip-btn" onclick="App.openScanList(\''+l.id+'\')">Open</button>'+(canEditScanList(l)?' <button class="chip-btn danger" onclick="App.askDeleteScanFromIndex(\''+l.id+'\')">Delete</button>':''))+'</div>'+
       '</div>';
     }).join("") : '<div style="color:var(--muted);padding:12px 4px;">No scan lists yet.</div>';
     return (
+      scanTopBar()+
       '<div class="kiosk-eyebrow">Barcode Scanner</div>'+
       '<div class="kiosk-title" style="text-align:left;">'+(mgr?'All scan lists':'My scan lists')+'</div>'+
       '<div class="kiosk-body" style="align-items:stretch;">'+
@@ -2463,7 +2535,7 @@
   }
   function scanListDetailHtml(){
     const l = findScanList(ui.scanListId);
-    const visible = l && scanListsVisible().some(function(x){ return x.id===l.id; });
+    const visible = l && (l === scanDraft || scanListsVisible().some(function(x){ return x.id===l.id; }));
     if (!l || !visible) return scanListsIndexHtml();
     const edit = canEditScanList(l);
     const items = l.items || [];
@@ -2520,11 +2592,12 @@
       ? '<div style="margin-top:12px;color:var(--bad);">Delete this whole list (and its '+items.length+' item(s))? <button class="btn btn-primary" style="background:var(--bad);" onclick="App.deleteScanList()">Yes, delete</button> <button class="btn btn-ghost" onclick="App.cancelDeleteScanList()">Keep</button></div>'
       : '<button class="link-btn" style="color:var(--bad);" onclick="App.askDeleteScanList()">Delete this list</button>') : "";
     return (
+      scanTopBar()+
       '<div class="kiosk-eyebrow">Barcode Scanner · '+escapeHtml(scanOwnerName(l))+'</div>'+
       '<div class="kiosk-body" style="align-items:stretch;">'+
         '<button class="link-btn" style="align-self:flex-start;margin:0;" onclick="App.closeScanList()">← All lists</button>'+
         dupBox+metaHtml+scanBar+
-        '<div style="font-weight:700;margin:6px 0;">Total recorded: '+items.length+' <span style="font-weight:500;color:'+(dbl?'var(--bad)':'var(--muted)')+';">· '+dbl+' double-scanned</span></div>'+
+        '<div style="font-weight:700;margin:6px 0;">Total recorded: '+items.length+(dbl?' <span style="font-weight:500;color:var(--bad);">· '+dbl+' double-scanned</span>':'')+'</div>'+
         '<div class="card" id="scanItemsList" data-scroll-keep style="padding:4px;max-height:360px;overflow-y:auto;">'+rows+'</div>'+
         '<button class="btn btn-primary" onclick="App.copyScanList(\''+l.id+'\')">Copy list (title, notes &amp; 3 columns)</button>'+
         delHtml+
@@ -3261,6 +3334,13 @@
   function managerBackupsPanel(){
     const list = backupsListCache || [];
     const canRestore = getMgrIdentity() === "mark";
+    function writerLine(b){
+      const w = b.writer;
+      if (!w) return "";
+      let seen = "";
+      if (w.lastSeen) { const t = new Date(w.lastSeen); seen = " · had last synced data from "+pad2(t.getHours())+":"+pad2(t.getMinutes())+":"+pad2(t.getSeconds()); }
+      return '<div style="font-size:12px;color:var(--muted);">Saved by '+escapeHtml((w.name?w.name+" · ":"")+(w.mode||"")+" · "+(w.kind||"")+" · device "+(w.device||"?"))+seen+'</div>';
+    }
     const rows = list.map(function(b){
       const d = new Date(b.createdAt);
       const label = fmtDateShort(d)+" "+d.getDate()+" "+MONTHS[d.getMonth()]+" "+d.getFullYear()+" · "+pad2(d.getHours())+":"+pad2(d.getMinutes());
@@ -3274,14 +3354,14 @@
         '</div></div>';
       }
       if (!canRestore) {
-        return '<div class="list-row"><div><b>'+escapeHtml(label)+'</b><div style="font-size:12px;color:var(--muted);">'+b.entryCount+' entries</div></div></div>';
+        return '<div class="list-row"><div><b>'+escapeHtml(label)+'</b><div style="font-size:12px;color:var(--muted);">'+b.entryCount+' entries</div>'+writerLine(b)+'</div></div>';
       }
       if (ui.confirmRestoreBackupId === b.id) {
         return '<div class="list-row"><div>Are you sure? This will delete data past the selected date.</div>'+
           '<div class="actions"><button class="chip-btn danger" onclick="App.confirmRestoreBackup2(\''+b.id+'\')">Yes, continue</button>'+
           '<button class="chip-btn" onclick="App.cancelRestoreBackup()">Cancel</button></div></div>';
       }
-      return '<div class="list-row"><div><b>'+escapeHtml(label)+'</b><div style="font-size:12px;color:var(--muted);">'+b.entryCount+' entries</div></div>'+
+      return '<div class="list-row"><div><b>'+escapeHtml(label)+'</b><div style="font-size:12px;color:var(--muted);">'+b.entryCount+' entries</div>'+writerLine(b)+'</div>'+
         '<div class="actions"><button class="chip-btn danger" onclick="App.confirmRestoreBackup(\''+b.id+'\')">Restore this snapshot</button></div></div>';
     }).join("");
     const body = backupsListLoading ? '<div style="color:var(--muted);font-size:14px;">Loading backups…</div>'
@@ -3543,6 +3623,7 @@
   const App = {
     switchMode: function(m){ setDeviceMode(m); ui = { screen:null }; saveUi(); render(); },
     goto: function(screen){
+      scanDraft = null;
       if (screen === "pickTask") setUi({ screen:screen, taskPickerSelectedId:null });
       else setUi({ screen:screen });
     },
@@ -3998,8 +4079,7 @@
       const now = new Date();
       const l = { id: uid("sl"), title: "Scan list "+fmtDateShort(now)+" "+pad2(now.getHours())+":"+pad2(now.getMinutes()), notes:"",
         ownerType: mgr?"manager":"worker", ownerId: ownerId, createdAt: now.toISOString(), updatedAt: now.toISOString(), items:[] };
-      scanLists().push(l);
-      persist(true, null, null, true);
+      scanDraft = l; // not saved until it has content or a manual name
       App.openScanList(l.id);
     },
     openScanList: function(id){
@@ -4008,21 +4088,48 @@
     },
     closeScanList: function(){
       closeCameraScan();
+      scanDraft = null;
       if (scanIsManagerView()) setUi({ mScreen:"scanlists", scanListId:null, scanDup:null });
       else setUi({ screen:"scanLists", scanListId:null, scanDup:null });
+    },
+    closeCameraAndDashboard: function(){
+      closeCameraScan(); scanDraft = null;
+      setUi({ mScreen:"dashboard", scanListId:null, scanDup:null });
+    },
+    askHome: function(){ setUi({ homeAsk:true }); },
+    cancelHome: function(){ setUi({ homeAsk:false }); },
+    goHome: function(){
+      closeCameraScan(); scanDraft = null;
+      setUi({ screen:"pickTask", taskPickerSelectedId:null, homeAsk:false, scanListId:null, scanDup:null });
     },
     gotoScanLists: function(){
       if (scanIsManagerView()) setUi({ mScreen:"scanlists", scanListId:null, scanDup:null });
       else setUi({ screen:"scanLists", scanListId:null, scanDup:null });
     },
     setScanFilterOwner: function(v){ setUi({ scanFilterOwner:v }); },
+    askDeleteScanFromIndex: function(id){ setUi({ scanIndexDeleteId:id }); },
+    cancelDeleteScanFromIndex: function(){ setUi({ scanIndexDeleteId:null }); },
+    deleteScanFromIndex: function(id){
+      const l = findScanList(id);
+      if (!l || !canEditScanList(l)) return;
+      STATE.scanLists = scanLists().filter(function(x){ return x.id!==id; });
+      persist(true, "List deleted.", null, true);
+      setUi({ scanIndexDeleteId:null });
+    },
     saveScanListMeta: function(){
       const l = findScanList(ui.scanListId);
       if (!l || !canEditScanList(l)) return;
       const t = document.getElementById("scanTitleInput"), n = document.getElementById("scanNotesInput");
-      if (t) l.title = t.value.trim() || "Untitled";
+      const wasDraft = (l === scanDraft);
+      const oldTitle = l.title;
+      if (t) { const nt = t.value.trim(); if (nt) l.title = nt; else if (!wasDraft) l.title = "Untitled"; }
       if (n) l.notes = n.value;
       l.updatedAt = new Date().toISOString();
+      if (wasDraft) {
+        // Only a manual rename or typed notes make an otherwise-empty draft worth keeping.
+        if (l.title === oldTitle && !(l.notes||"").trim()) return;
+        scanPromoteDraft(l);
+      }
       persist(true, null, null, true);
     },
     addScanCode: function(){
@@ -4093,8 +4200,8 @@
     deleteScanList: function(){
       const l = findScanList(ui.scanListId);
       if (!l || !canEditScanList(l)) return;
-      STATE.scanLists = scanLists().filter(function(x){ return x.id!==l.id; });
-      persist(true, "List deleted.", null, true);
+      if (l === scanDraft) scanDraft = null;
+      else { STATE.scanLists = scanLists().filter(function(x){ return x.id!==l.id; }); persist(true, "List deleted.", null, true); }
       closeCameraScan();
       if (scanIsManagerView()) setUi({ mScreen:"scanlists", scanListId:null, scanDeleteConfirm:null });
       else setUi({ screen:"scanLists", scanListId:null, scanDeleteConfirm:null });
@@ -4105,6 +4212,7 @@
       copyTextToClipboard(scanListCopyText(l), "Copied “"+(l.title||"Untitled")+"” ("+(l.items||[]).length+" item(s)).");
     },
     gotoManager: function(screen){
+      if (screen !== "scanlist") scanDraft = null;
       setUi({ mScreen:screen });
       if (screen === "backups" && !backupsListCache && !backupsListLoading) loadBackupsList();
     },
