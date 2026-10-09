@@ -1997,6 +1997,19 @@
         (rows || '<div style="color:var(--muted);font-size:14px;">No entries for this '+(view==="day"?"day":"week")+' yet.</div>')+
       '</div>';
   }
+  // Slim one-line live monitor shown only for Geraldine: this week's total made (all
+  // workers combined) for 7000AI Provisioning and 7000AI Final Assy. Updates live as
+  // other tablets save, since the whole screen re-renders on every remote change.
+  function liveMonitorLine(owner){
+    if (!owner || String(owner.name||"").trim().toLowerCase() !== "geraldine") return "";
+    const agg = aggregateWeek(weekKeyOf(new Date()));
+    function made(name){
+      const t = findTaskByNameOrAlias(name);
+      return (t && agg[t.id]) ? agg[t.id].made : 0;
+    }
+    return '<div style="font-size:12.5px;color:var(--muted);text-align:center;margin:-4px 0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
+      '● Live this week · Provisioning <b style="color:var(--ink);">'+made("7000AI PROVISIONING")+'</b> · Final Assy <b style="color:var(--ink);">'+made("7000AI Final Assy")+'</b></div>';
+  }
   function pickTaskBody(){
     const tasks = activeTasks();
     if (!tasks.length) {
@@ -2020,6 +2033,7 @@
       '<div class="kiosk-eyebrow">Step 1 of 2</div>'+
       '<div class="kiosk-title">What do you want to update?</div>'+
       '<div class="kiosk-sub">Choose the task you just worked on.</div>'+
+      liveMonitorLine(owner)+
       taskShortcutsSection(owner)+
       '<div class="kiosk-body">'+
         '<div class="card" id="taskPickerList" data-scroll-keep style="max-height:320px;overflow-y:auto;text-align:left;padding:4px;">'+listRows+'</div>'+
