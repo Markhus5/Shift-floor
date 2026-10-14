@@ -3418,8 +3418,32 @@
       '</div>'
     );
   }
+  function entryExactTime(iso){
+    const d = new Date(iso);
+    if (isNaN(d)) return "";
+    return fmtDateShort(d)+" "+pad2(d.getHours())+":"+pad2(d.getMinutes())+":"+pad2(d.getSeconds());
+  }
   function managerEntriesPanel(){
-    const entries = STATE.entries.slice().sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
+    const allEntries = STATE.entries.slice().sort(function(a,b){ return new Date(b.ts)-new Date(a.ts); });
+    // Possible repeats: same worker + task + made + faults + date logged within 2 minutes of an
+    // earlier one. Flags the LATER one so it's obvious which to delete if it's a real double-submit.
+    const repeatOf = {};
+    (function(){
+      const groups = {};
+      allEntries.slice().reverse().forEach(function(e){
+        const k = [e.workerId, e.taskId, e.made, e.faults, e.entryDate||""].join("|");
+        const g = groups[k] || (groups[k] = []);
+        const prev = g.length ? g[g.length-1] : null;
+        if (prev && (new Date(e.ts) - new Date(prev.ts)) <= 120000) repeatOf[e.id] = Math.round((new Date(e.ts) - new Date(prev.ts))/1000);
+        g.push(e);
+      });
+    })();
+    const wf = ui.entryLogWorker || "";
+    const entries = wf ? allEntries.filter(function(e){ return e.workerId === wf; }) : allEntries;
+    const workerOpts = '<option value="">All workers (all entries, latest first)</option>'+
+      STATE.workers.slice().sort(function(a,b){ return a.name.localeCompare(b.name); }).map(function(w){
+        return '<option value="'+w.id+'"'+(wf===w.id?' selected':'')+'>'+escapeHtml(w.name)+(w.active?'':' (inactive)')+'</option>';
+      }).join("");
     const rows = entries.map(function(e){
       const w = findWorker(e.workerId);
       const t = findTask(e.taskId);
@@ -3452,7 +3476,8 @@
           '<button class="chip-btn" onclick="App.cancelDeleteEntry()">Cancel</button></div></div>';
       }
       return '<div class="list-row"><div><div><b>'+escapeHtml(attributionName)+'</b> — '+escapeHtml(taskName)+'</div>'+
-        '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · for '+escapeHtml(e.entryDate||"—")+' · logged '+fmtRelTime(e.ts)+'</div></div>'+
+        '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · for '+escapeHtml(e.entryDate||"—")+' · logged '+fmtRelTime(e.ts)+' · <span style="font-family:var(--font-mono);">'+escapeHtml(entryExactTime(e.ts))+'</span>'+(e.scanListId?' · via Scan List':'')+'</div>'+
+        (repeatOf[e.id]!==undefined ? '<div style="font-size:12px;color:var(--bad);font-weight:600;margin-top:2px;">⚠ Possible repeat — same worker, task and amount as an entry logged '+repeatOf[e.id]+'s earlier</div>' : '')+'</div>'+
         '<div class="actions"><button class="chip-btn" onclick="App.startEntryEdit(\''+e.id+'\')">Edit</button>'+
         '<button class="chip-btn danger" onclick="App.startDeleteEntry(\''+e.id+'\')">Delete</button></div></div>';
     }).join("");
@@ -3460,6 +3485,10 @@
       '<div class="card panel">'+
         '<div class="panel-head"><h3>Entry Log</h3><button class="link-btn" style="margin:0;" onclick="App.gotoManager(\'dashboard\')">← Back to dashboard</button></div>'+
         '<div style="color:var(--muted);font-size:13px;margin-bottom:12px;">Every logged entry, most recent first. Edits and deletes apply immediately — no time limit.</div>'+
+        '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">'+
+          '<select id="entryLogWorkerSel" onchange="App.setEntryLogWorker(this.value)" style="padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:13px;">'+workerOpts+'</select>'+
+          '<span style="font-size:13px;color:var(--muted);">'+entries.length+' entr'+(entries.length===1?'y':'ies')+' · '+entries.reduce(function(n,e){ return n+(e.made||0); },0)+' made'+(wf?' · latest first':'')+'</span>'+
+        '</div>'+
         (rows || '<div style="color:var(--muted);font-size:14px;">No entries logged yet.</div>')+
       '</div>'
     );
@@ -4912,6 +4941,7 @@
       persist(false, items.length+" faulty board(s) recorded for "+scanTaskName(taskId)+".", "Saved locally — will sync.");
       setUi({ scanAssigning:false });
     },
+    setEntryLogWorker: function(id){ setUi({ entryLogWorker:id }); },
     gotoManager: function(screen){
       if (screen !== "scanlist") scanDraft = null;
       setUi({ mScreen:screen });
