@@ -656,10 +656,9 @@
   // if it matches ANY configured pattern — one per board type (7000/7010/7020 etc.), fully
   // editable from Settings so the prefix format can be changed to anything in future.
   const DEFAULT_SERIAL_FORMATS = [
-    { id:"fmt-7000", label:"7000 board", pattern:"7000-03+01 XXXXXX" },
-    { id:"fmt-7010", label:"7010 board", pattern:"7010-03+01 XXXXXX" },
-    { id:"fmt-7020", label:"7020 board", pattern:"7020-03+01 XXXXXX" }
+    { id:"fmt-701", label:"Final Assy / Provisioning serial", pattern:"701XXXXXX" }
   ];
+  const SERIAL_FORMAT_SEED_TAG = "v2-final-assy-701-1";
   // Retargets serial scanning from "7000AI PROVISIONING" to "7000AI Final Assy" — a task
   // that already exists in live Firestore data (created earlier via the "other job" alias
   // flow) but isn't in this file's DEFAULT_TASK_NAMES seed list. See migrateState(): this
@@ -982,6 +981,24 @@
       changed = true;
     }
     if (STATE.serialFormat !== undefined) { delete STATE.serialFormat; changed = true; }
+    // Each serial rule can be linked to tasks. Rules from before this change had no links:
+    // they applied to 7000AI Final Assy, and now to 7000AI PROVISIONING as well.
+    (function(){
+      const prov = findTaskByNameOrAlias("7000AI PROVISIONING");
+      STATE.serialFormats.forEach(function(f){
+        if (!Array.isArray(f.taskIds)) {
+          f.taskIds = [STATE.serialTaskId].concat(prov ? [prov.id] : []).filter(Boolean);
+          changed = true;
+        }
+      });
+    })();
+    // One-time switch to the Final Assy serial rule (9 digits starting 701). After this it
+    // stays fully editable from Settings.
+    if (STATE.serialFormatSeedTag !== SERIAL_FORMAT_SEED_TAG) {
+      STATE.serialFormats = DEFAULT_SERIAL_FORMATS.map(function(f){ return Object.assign({}, f); });
+      STATE.serialFormatSeedTag = SERIAL_FORMAT_SEED_TAG;
+      changed = true;
+    }
 
     if (STATE.smtSeedTag !== SMT_SEED_TAG) {
       const existingSmt = {};
@@ -1518,12 +1535,19 @@
     }
     return true;
   }
-  function validateSerialFormat(raw){
+  // Rules linked to a task (Settings → Serial Number Formats). A task with no linked rule has
+  // no format restriction. With no task given, the serial task (Final Assy) is assumed.
+  function serialRulesFor(taskId){
     const formats = (Array.isArray(STATE.serialFormats) && STATE.serialFormats.length) ? STATE.serialFormats : DEFAULT_SERIAL_FORMATS;
-    const ok = formats.some(function(f){ return matchesSerialPattern(raw, f.pattern || ""); });
-    if (ok) return null;
-    const examples = formats.map(function(f){ return f.pattern; }).join(" or ");
-    return "Wrong format — must match "+examples+" (X = any digit).";
+    return formats.filter(function(f){ return f.pattern && Array.isArray(f.taskIds) && f.taskIds.indexOf(taskId) > -1; });
+  }
+  function validateSerialFormat(raw, taskId){
+    taskId = taskId || STATE.serialTaskId;
+    const rules = serialRulesFor(taskId);
+    if (!rules.length) return null;
+    if (rules.some(function(f){ return matchesSerialPattern(raw, f.pattern); })) return null;
+    const t = findTask(taskId);
+    return "Wrong format"+(t?(" for "+t.name):"")+" — must match "+rules.map(function(f){ return f.pattern; }).join(" or ")+" (X = any digit).";
   }
   function focusSelectSerialInput(clearValue){
     setTimeout(function(){
@@ -1689,28 +1713,66 @@
     out.sort(function(a,b){ return b.start - a.start; });
     return out;
   }
+  // 7000AI Final Assy tally rule: only units recorded with a scanned serial count. An entry
+  // for the serial task contributes its scanned serials (plus its faults, once it has any
+  // serials); units still waiting to be scanned are NOT in the tally — they are reported
+  // separately as "pending". Every other task is untouched.
+  function serialLinkCounts(){
+    const m = {};
+    (STATE.serials||[]).forEach(function(s){ if (s.entryId) m[s.entryId] = (m[s.entryId]||0) + 1; });
+    return m;
+  }
+  function entryTally(e, links){
+    if (e.taskId !== STATE.serialTaskId || !STATE.serialTaskId || e.made <= 0) return { made:e.made, faults:e.faults, pending:0 };
+    const n = links[e.id] || 0;
+    const good = Math.max(0, e.made - e.faults);
+    const pending = Math.max(0, good - n);
+    if (!n) return { made:0, faults:0, pending:pending };
+    return { made:n + e.faults, faults:e.faults, pending:pending };
+  }
+  // Serials with no entry behind them (older catch-up scans) still count, by their date.
+  function addOrphanSerials(byTask, inPeriod){
+    if (!STATE.serialTaskId) return;
+    const entryIds = {};
+    STATE.entries.forEach(function(e){ entryIds[e.id] = true; });
+    (STATE.serials||[]).forEach(function(s){
+      if (s.taskId !== STATE.serialTaskId) return;
+      if (s.entryId && entryIds[s.entryId]) return;
+      if (!inPeriod(s.entryDate || s.ts)) return;
+      const agg = byTask[STATE.serialTaskId] || (byTask[STATE.serialTaskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null, pending:0 });
+      agg.made += 1;
+    });
+  }
   function aggregateWeek(weekKey){
     const byTask = {};
+    const links = serialLinkCounts();
     STATE.entries.forEach(function(e){
       if (weekKeyOf(e.entryDate) !== weekKey) return;
-      const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null });
-      agg.made += e.made;
-      agg.faults += e.faults;
+      const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null, pending:0 });
+      const t = entryTally(e, links);
+      agg.made += t.made;
+      agg.faults += t.faults;
+      agg.pending += t.pending;
       agg.count += 1;
-      if (!agg.lastTs || new Date(e.ts) > new Date(agg.lastTs)) { agg.lastTs = e.ts; agg.lastEntry = e; }
+      if ((!agg.lastTs || new Date(e.ts) > new Date(agg.lastTs)) && !(e.taskId === STATE.serialTaskId && e.made > 0 && t.made === 0)) { agg.lastTs = e.ts; agg.lastEntry = e; agg.lastMade = t.made; agg.lastFaults = t.faults; }
     });
+    addOrphanSerials(byTask, function(d){ return weekKeyOf(d) === weekKey; });
     return byTask;
   }
   function aggregateMonth(monthKey){
     const byTask = {};
+    const links = serialLinkCounts();
     STATE.entries.forEach(function(e){
       if (monthKeyOf(e.entryDate) !== monthKey) return;
-      const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null });
-      agg.made += e.made;
-      agg.faults += e.faults;
+      const agg = byTask[e.taskId] || (byTask[e.taskId] = { made:0, faults:0, count:0, lastTs:null, lastEntry:null, pending:0 });
+      const t = entryTally(e, links);
+      agg.made += t.made;
+      agg.faults += t.faults;
+      agg.pending += t.pending;
       agg.count += 1;
-      if (!agg.lastTs || new Date(e.ts) > new Date(agg.lastTs)) { agg.lastTs = e.ts; agg.lastEntry = e; }
+      if ((!agg.lastTs || new Date(e.ts) > new Date(agg.lastTs)) && !(e.taskId === STATE.serialTaskId && e.made > 0 && t.made === 0)) { agg.lastTs = e.ts; agg.lastEntry = e; agg.lastMade = t.made; agg.lastFaults = t.faults; }
     });
+    addOrphanSerials(byTask, function(d){ return monthKeyOf(d) === monthKey; });
     return byTask;
   }
   function yieldPct(made, faults, ppu){
@@ -1741,12 +1803,14 @@
   }
   function buildWorkerTaskRows(filterFn){
     const byWorker = {};
+    const links = serialLinkCounts();
     STATE.entries.filter(filterFn).forEach(function(e){
       const task = findTask(e.taskId);
       const ppu = (task && task.partsPerUnit) || 1;
       const w = byWorker[e.workerId] || (byWorker[e.workerId] = { workerId:e.workerId, tasks:{}, made:0, faults:0, capacity:0 });
       const tk = w.tasks[e.taskId] || (w.tasks[e.taskId] = { made:0, faults:0, capacity:0, ppu:ppu });
-      tk.made += e.made; tk.faults += e.faults;
+      const t = entryTally(e, links);
+      tk.made += t.made; tk.faults += t.faults;
     });
     // Negative correction entries (Fix 2) are summed in as-is above; clamp the AGGREGATE
     // running total at zero here (never the individual entry) so a correction can't drive
@@ -2759,6 +2823,18 @@
     const code = scanCleanCode(raw);
     if (!code) return;
     if (ui.scanDup && ui.scanDup.listId === listId) { playBeep(); return; } // a decision is pending
+    // The task's own scanning rule applies (Settings → Serial Number Formats): a serial that
+    // doesn't match any rule linked to the task is refused and never counted.
+    if (l.taskId) {
+      const fmtErr = validateSerialFormat(code, l.taskId);
+      if (fmtErr) {
+        playBeep();
+        scanSetStatus("bad", "REJECTED — "+code+" · "+fmtErr+" Not added.");
+        showToast("Wrong serial format — not added");
+        render();
+        return;
+      }
+    }
     const hits = scanFindOccurrences(l, code);
     const n = (l.items||[]).length;
     if (hits.length) {
@@ -3193,7 +3269,7 @@
       '<div class="kiosk-title">Enter the dashboard PIN</div>'+
       '<div class="kiosk-sub">This area is for the manager only.</div>'+
       '<div class="kiosk-body">'+
-        '<input class="big" type="password" inputmode="numeric" id="pinInput" data-autofocus="1" placeholder="••••">'+
+        '<input class="big" type="password" inputmode="numeric" id="pinInput" data-autofocus="1" placeholder="••••" onkeydown="if(event.key===\'Enter\'){event.preventDefault();App.submitPin();}">'+
         err+
         '<button class="btn btn-primary" onclick="App.submitPin()">Unlock</button>'+
         '<button class="link-btn" onclick="App.switchMode(\'worker\')">Back to Worker view</button>'+
@@ -3218,7 +3294,7 @@
       } else {
         whoText = escapeHtml(w?w.name:"unknown");
       }
-      recent = '<div class="task-recent">+<b>'+a.lastEntry.made+'</b> made / <b>'+a.lastEntry.faults+'</b> faults — '+fmtRelTime(a.lastEntry.ts)+' · '+whoText+'</div>';
+      recent = '<div class="task-recent">+<b>'+(a.lastMade!=null?a.lastMade:a.lastEntry.made)+'</b> made / <b>'+(a.lastFaults!=null?a.lastFaults:a.lastEntry.faults)+'</b> faults — '+fmtRelTime(a.lastEntry.ts)+' · '+whoText+'</div>';
     }
     const pinBtn = opts.pinned
       ? '<button class="chip-btn" onclick="App.unpinTask('+opts.slot+')">Unpin</button>'
@@ -3288,7 +3364,7 @@
     const weekInfo = serialWeekTargets()[curKey];
     const curTarget = weekInfo ? weekInfo.target : 0;
     const curScanned = weekInfo ? weekInfo.scanned : 0;
-    const countLabel = (!showAll && curTarget > 0) ? ('('+curScanned+' out of '+curTarget+')') : ('('+list.length+')');
+    const countLabel = '('+list.length+')';
     const header = '<div class="section-title" id="serialsPanelAnchor" style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">'+
       '<span>Scanned Serial Numbers · '+(showAll?"All-Time":"This Week")+' '+countLabel+'</span>'+
       '<div style="display:flex;gap:8px;flex-wrap:wrap;">'+
@@ -3438,6 +3514,14 @@
         g.push(e);
       });
     })();
+    const unscannedIds = {};
+    (function(){
+      const links = serialLinkCounts();
+      allEntries.forEach(function(e){
+        if (STATE.serialTaskId && e.taskId === STATE.serialTaskId && e.made > 0 && !links[e.id] && !e.scanListId) unscannedIds[e.id] = true;
+      });
+    })();
+    const unscannedCount = Object.keys(unscannedIds).length;
     const wf = ui.entryLogWorker || "";
     const entries = wf ? allEntries.filter(function(e){ return e.workerId === wf; }) : allEntries;
     const workerOpts = '<option value="">All workers (all entries, latest first)</option>'+
@@ -3477,6 +3561,7 @@
       }
       return '<div class="list-row"><div><div><b>'+escapeHtml(attributionName)+'</b> — '+escapeHtml(taskName)+'</div>'+
         '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · for '+escapeHtml(e.entryDate||"—")+' · logged '+fmtRelTime(e.ts)+' · <span style="font-family:var(--font-mono);">'+escapeHtml(entryExactTime(e.ts))+'</span>'+(e.scanListId?' · via Scan List':'')+'</div>'+
+        (unscannedIds[e.id] ? '<div style="font-size:12px;color:var(--warn);font-weight:600;margin-top:2px;">No serials attached — not in the Final Assy tally</div>' : '')+
         (repeatOf[e.id]!==undefined ? '<div style="font-size:12px;color:var(--bad);font-weight:600;margin-top:2px;">⚠ Possible repeat — same worker, task and amount as an entry logged '+repeatOf[e.id]+'s earlier</div>' : '')+'</div>'+
         '<div class="actions"><button class="chip-btn" onclick="App.startEntryEdit(\''+e.id+'\')">Edit</button>'+
         '<button class="chip-btn danger" onclick="App.startDeleteEntry(\''+e.id+'\')">Delete</button></div></div>';
@@ -3489,6 +3574,8 @@
           '<select id="entryLogWorkerSel" onchange="App.setEntryLogWorker(this.value)" style="padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:13px;">'+workerOpts+'</select>'+
           '<span style="font-size:13px;color:var(--muted);">'+entries.length+' entr'+(entries.length===1?'y':'ies')+' · '+entries.reduce(function(n,e){ return n+(e.made||0); },0)+' made'+(wf?' · latest first':'')+'</span>'+
         '</div>'+
+        (unscannedCount ? '<div class="list-row" style="flex-wrap:wrap;gap:10px;"><div style="font-size:13px;">'+unscannedCount+' Final Assy entr'+(unscannedCount===1?'y has':'ies have')+' no serials attached (they are not counted anywhere).</div>'+
+          '<button class="chip-btn danger" onclick="App.deleteUnscannedFinalAssy()">Delete '+unscannedCount+' unscanned entr'+(unscannedCount===1?'y':'ies')+'</button></div>' : '')+
         (rows || '<div style="color:var(--muted);font-size:14px;">No entries logged yet.</div>')+
       '</div>'
     );
@@ -3498,6 +3585,7 @@
   // the manual-add date to that week's start (App.startCatchupScan) so newly-added serials
   // get attributed to that week, not today.
   function serialCatchupBanner(){
+    return ""; // unscanned counts are no longer tracked — only scanned serials count
     if (!STATE.serialTaskId) return "";
     // Dismissible: if a past shortfall is never going to be fulfilled (the units are long
     // gone, nobody's scanning them now), "Dismiss" acknowledges it the same way other
@@ -3781,17 +3869,27 @@
   function serialFormatsSection(){
     const formats = (Array.isArray(STATE.serialFormats) && STATE.serialFormats.length) ? STATE.serialFormats : DEFAULT_SERIAL_FORMATS;
     const rows = formats.map(function(f, idx){
+      const linked = (f.taskIds||[]).map(function(tid){
+        const t = findTask(tid);
+        return t ? '<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:3px 4px 3px 10px;font-size:12.5px;">'+escapeHtml(t.name)+
+          '<button class="chip-btn" style="margin:0;padding:1px 7px;" onclick="App.unlinkSerialFormatTask('+idx+',\''+tid+'\')" title="Unlink">×</button></span>' : '';
+      }).join(" ");
+      const taskOpts = '<option value="">+ Link a task…</option>'+STATE.tasks.filter(function(t){ return (f.taskIds||[]).indexOf(t.id)===-1; }).map(function(t){
+        return '<option value="'+t.id+'">'+escapeHtml(t.name)+'</option>';
+      }).join("");
       return '<div class="list-row" style="align-items:flex-start;flex-wrap:wrap;">'+
         '<div style="display:flex;gap:10px;flex-wrap:wrap;flex:1;min-width:220px;">'+
           '<input type="text" id="serialFmtLabel-'+idx+'" value="'+escapeHtml(f.label||"")+'" placeholder="Board label e.g. 7010 board" style="flex:1;min-width:140px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);">'+
-          '<input type="text" id="serialFmtPattern-'+idx+'" value="'+escapeHtml(f.pattern||"")+'" placeholder="e.g. 7010-03+01 XXXXXX" style="flex:2;min-width:200px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-family:var(--font-mono);">'+
+          '<input type="text" id="serialFmtPattern-'+idx+'" value="'+escapeHtml(f.pattern||"")+'" placeholder="e.g. 701XXXXXX" style="flex:2;min-width:200px;padding:10px 12px;border-radius:9px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font-family:var(--font-mono);">'+
+          '<div style="flex-basis:100%;display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><span style="font-size:12.5px;color:var(--muted);">Expected in:</span>'+(linked || '<span style="font-size:12.5px;color:var(--warn);">no task linked — this rule is not used</span>')+
+            '<select onchange="App.linkSerialFormatTask('+idx+',this.value)" style="padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:12.5px;">'+taskOpts+'</select></div>'+
         '</div>'+
         '<button class="chip-btn danger" onclick="App.removeSerialFormatRow('+idx+')" title="Remove this format">Remove</button>'+
       '</div>';
     }).join("");
     return (
-      '<div class="field"><label>Serial Number Formats (7000AI Final Assy)</label>'+
-        '<div style="color:var(--muted);font-size:12.5px;margin-bottom:8px;">One row per board type. Use “X” for each serial digit — everything else (dashes, “+”, spaces) must match exactly, e.g. 7010-03+01 XXXXXX. A scanned/typed serial is accepted if it matches any row below.</div>'+
+      '<div class="field"><label>Serial Number Formats (per task)</label>'+
+        '<div style="color:var(--muted);font-size:12.5px;margin-bottom:8px;">One row per format. Use “X” for each serial digit — everything else (dashes, “+”, spaces) must match exactly, e.g. 701XXXXXX. Link each row to the task(s) it is expected in: a scan in that task is accepted only if it matches a row linked to it. A task with no linked row has no format check.</div>'+
         rows+
         '<div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">'+
           '<button class="chip-btn" onclick="App.addSerialFormatRow()">+ Add board type</button>'+
@@ -5226,6 +5324,16 @@
     },
     startDeleteEntry: function(id){ setUi({ confirmDeleteEntryId:id, editingEntryId:null }); },
     cancelDeleteEntry: function(){ setUi({ confirmDeleteEntryId:null }); },
+    deleteUnscannedFinalAssy: function(){
+      const links = serialLinkCounts();
+      const gone = STATE.entries.filter(function(e){ return STATE.serialTaskId && e.taskId === STATE.serialTaskId && e.made > 0 && !links[e.id] && !e.scanListId; });
+      if (!gone.length) return;
+      if (!confirm("Delete "+gone.length+" Final Assy entr"+(gone.length===1?"y":"ies")+" that have no serial numbers attached? This cannot be undone.")) return;
+      const ids = {}; gone.forEach(function(e){ ids[e.id] = true; });
+      STATE.entries = STATE.entries.filter(function(e){ return !ids[e.id]; });
+      persist(false, gone.length+" unscanned entr"+(gone.length===1?"y":"ies")+" deleted.");
+      render();
+    },
     deleteEntry: function(id){
       STATE.entries = STATE.entries.filter(function(e){ return e.id!==id; });
       persist(false, "Entry deleted.");
@@ -5246,7 +5354,14 @@
       const dateInput = document.getElementById("newSerialManualDate");
       let entryDate = (dateInput && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.value)) ? dateInput.value : todayDateOnly();
       if (entryDate > todayDateOnly()) entryDate = todayDateOnly();
-      STATE.serials.push({ id:uid("s"), serial:val, taskId:STATE.serialTaskId, workerId:null, entryId:null, ts:new Date().toISOString(), entryDate:entryDate });
+      // Link the catch-up serial to the oldest entry that week still waiting for scans, so it
+      // moves from "pending" into the tally under that entry's worker.
+      const linkCounts = serialLinkCounts();
+      const wk = weekKeyOf(entryDate);
+      const waiting = STATE.entries.filter(function(e){
+        return e.taskId === STATE.serialTaskId && e.made > 0 && weekKeyOf(e.entryDate) === wk && (e.made - e.faults) > (linkCounts[e.id]||0);
+      }).sort(function(a,b){ return new Date(a.ts) - new Date(b.ts); })[0];
+      STATE.serials.push({ id:uid("s"), serial:val, taskId:STATE.serialTaskId, workerId: waiting ? waiting.workerId : null, entryId: waiting ? waiting.id : null, ts:new Date().toISOString(), entryDate:entryDate });
       persist(false, "Serial added.", "Saved locally — will sync.");
       render();
     },
@@ -5280,30 +5395,45 @@
       ui.editingSerialId = null; saveUi();
       persist(); render();
     },
+    // Reads the label/pattern boxes back into STATE.serialFormats (keeping task links) so link /
+    // unlink / add / remove never lose text typed but not yet saved.
+    syncSerialFormatInputs: function(){
+      STATE.serialFormats = (STATE.serialFormats||[]).map(function(f, idx){
+        const labelEl = document.getElementById("serialFmtLabel-"+idx);
+        const patternEl = document.getElementById("serialFmtPattern-"+idx);
+        return { id: f.id || uid("fmt"), label: labelEl ? labelEl.value.trim() : (f.label||""), pattern: patternEl ? patternEl.value.trim() : (f.pattern||""), taskIds: (f.taskIds||[]).slice() };
+      });
+    },
+    linkSerialFormatTask: function(idx, taskId){
+      if (!taskId) return;
+      App.syncSerialFormatInputs();
+      const f = STATE.serialFormats[idx]; if (!f) return;
+      if (f.taskIds.indexOf(taskId) === -1) f.taskIds.push(taskId);
+      persist(); render();
+    },
+    unlinkSerialFormatTask: function(idx, taskId){
+      App.syncSerialFormatInputs();
+      const f = STATE.serialFormats[idx]; if (!f) return;
+      f.taskIds = f.taskIds.filter(function(t){ return t !== taskId; });
+      persist(); render();
+    },
     addSerialFormatRow: function(){
-      const formats = (Array.isArray(STATE.serialFormats) && STATE.serialFormats.length) ? STATE.serialFormats.slice() : DEFAULT_SERIAL_FORMATS.map(function(f){ return Object.assign({}, f); });
-      formats.push({ id: uid("fmt"), label:"New board", pattern:"" });
-      STATE.serialFormats = formats;
+      if (!Array.isArray(STATE.serialFormats) || !STATE.serialFormats.length) STATE.serialFormats = DEFAULT_SERIAL_FORMATS.map(function(f){ return Object.assign({}, f, {taskIds:[]}); });
+      App.syncSerialFormatInputs();
+      STATE.serialFormats.push({ id: uid("fmt"), label:"New format", pattern:"", taskIds:[] });
       render();
     },
     removeSerialFormatRow: function(idx){
+      App.syncSerialFormatInputs();
       const formats = (STATE.serialFormats||[]).slice();
       if (formats.length <= 1) { showToast("Keep at least one format."); return; }
       formats.splice(idx,1);
       STATE.serialFormats = formats;
-      render();
+      persist(); render();
     },
     saveSerialFormats: function(){
-      const current = (STATE.serialFormats||[]);
-      const formats = current.map(function(f, idx){
-        const labelEl = document.getElementById("serialFmtLabel-"+idx);
-        const patternEl = document.getElementById("serialFmtPattern-"+idx);
-        return {
-          id: f.id || uid("fmt"),
-          label: labelEl ? labelEl.value.trim() : (f.label||""),
-          pattern: patternEl ? patternEl.value.trim() : (f.pattern||"")
-        };
-      }).filter(function(f){ return f.pattern; });
+      App.syncSerialFormatInputs();
+      const formats = STATE.serialFormats.filter(function(f){ return f.pattern; });
       if (!formats.length) { showToast("Add at least one valid pattern."); return; }
       STATE.serialFormats = formats;
       persist(); showToast("Serial formats updated."); render();
