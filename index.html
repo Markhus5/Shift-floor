@@ -391,6 +391,46 @@
   .standup-svg{position:absolute; opacity:.4; pointer-events:none;}
   @keyframes standupBlink{ 0%,49%{ background:#4FC3F7; } 50%,100%{ background:#FFFFFF; } }
   .standup-overlay.blinking{ animation: standupBlink 1s steps(1,end) 5; }
+  .standup-dismiss{
+    position:absolute; top:16px; right:16px; z-index:2; width:auto; margin:0;
+    padding:12px 22px; border-radius:999px; border:2px solid #08222c; background:rgba(255,255,255,.55);
+    color:#08222c; font-weight:700; font-size:15px; cursor:pointer;
+  }
+
+  /* ---- Software Update announcement overlay (pastel orange) ---- */
+  .ann-overlay{
+    position:fixed; inset:0; z-index:9998; background:#FFD3AC; color:#3B1E08;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px;
+    text-align:center; padding:28px; overflow:hidden;
+  }
+  .ann-overlay .ann-svg{position:absolute; opacity:.35; pointer-events:none;}
+  .ann-overlay .kiosk-eyebrow{color:#7A3E10;}
+  .ann-heading{
+    font-family:var(--font-mono); font-variant-numeric:tabular-nums; font-weight:700; line-height:1.05;
+    font-size:clamp(34px,7.5vw,84px); color:#3B1E08; max-width:min(1100px,94vw); overflow-wrap:anywhere;
+    position:relative; z-index:1;
+  }
+  .ann-body{
+    font-size:clamp(17px,2.8vw,24px); line-height:1.45; color:#3B1E08; max-width:min(760px,92vw);
+    white-space:pre-line; position:relative; z-index:1;
+  }
+  .ann-btn{
+    width:auto; margin:0; padding:16px 30px; border-radius:12px; font-weight:700; font-size:17px; cursor:pointer;
+    border:2px solid #3B1E08; position:relative; z-index:1;
+  }
+  .ann-btn.primary{background:#3B1E08; color:#FFF3E8;}
+  .ann-btn.ghost{background:rgba(255,255,255,.55); color:#3B1E08;}
+  .ann-confirm{
+    background:rgba(255,255,255,.7); border:2px solid #3B1E08; border-radius:16px; padding:18px 22px;
+    max-width:min(520px,92vw); position:relative; z-index:1; display:flex; flex-direction:column; gap:14px; align-items:center;
+  }
+  .ann-confirm .row{display:flex; gap:12px; flex-wrap:wrap; justify-content:center;}
+  .ann-form input, .ann-form textarea{
+    width:100%; padding:10px 12px; border-radius:9px; border:1.5px solid var(--line);
+    background:var(--surface); color:var(--ink); font:inherit; box-sizing:border-box;
+  }
+  .ann-form textarea{min-height:84px; resize:vertical;}
+  .ann-item{border:1.5px solid var(--line); border-left:8px solid #FFB97A; border-radius:10px; padding:12px 14px; margin:10px 0;}
 </style>
 </head>
 <body>
@@ -691,6 +731,15 @@
   // Locked highlights set by the manager: always shown for that worker, can't be changed
   // by them, and the colour is reserved (hidden from their own palette) so it stays unique.
   // The task also becomes that worker's default (first) task when starting a Scan List.
+  // Announcements shipped with an app update ("appdate"). Each is added to the shared
+  // state once (tracked in STATE.announcementSeeds) and its text is frozen here.
+  // dismissibleFrom: before this date a dismiss only hides it until the app is next
+  // opened/refreshed (so it keeps popping up while testing); from this date it's permanent.
+  const SEEDED_ANNOUNCEMENTS = [
+    { id:"an-appdate-2026-11-02", heading:"App updated — new task colours",
+      body:"You can now colour your favourite tasks with the 🎨 button.\nYour order stays the same.",
+      showFrom:"2026-11-01", showTime:"00:00", dismissibleFrom:"2026-11-02" }
+  ];
   const LOCKED_HIGHLIGHTS = [
     { worker:"kim", task:FINAL_ASSY_TASK_NAME, color:"yellow" }
   ];
@@ -759,6 +808,7 @@
       managersSeedTag: MANAGERS_SEED_TAG,
       faultBoards: [],
       standup: Object.assign({}, DEFAULT_STANDUP),
+      announcements: [],
       standupSeedTag: STANDUP_SEED_TAG,
       recoverySeedTag: RECOVERY_SEED_TAG
     };
@@ -1067,6 +1117,19 @@
       changed = true;
     }
     if (!STATE.standup) { STATE.standup = Object.assign({}, DEFAULT_STANDUP); changed = true; }
+    if (!Array.isArray(STATE.announcements)) { STATE.announcements = []; changed = true; }
+    if (!Array.isArray(STATE.announcementSeeds)) { STATE.announcementSeeds = []; changed = true; }
+    SEEDED_ANNOUNCEMENTS.forEach(function(sa){
+      if (STATE.announcementSeeds.indexOf(sa.id) > -1) return;
+      STATE.announcementSeeds.push(sa.id);
+      if (!STATE.announcements.some(function(a){ return a.id===sa.id; })) {
+        STATE.announcements.push(Object.assign({ active:true, createdAt:new Date().toISOString(), createdBy:"appdate", dismissedBy:{} }, sa));
+      }
+      changed = true;
+    });
+    STATE.announcements.forEach(function(a){
+      if (!a.dismissedBy || typeof a.dismissedBy !== "object") { a.dismissedBy = {}; changed = true; }
+    });
     if (!Array.isArray(STATE.standup.days)) { STATE.standup.days = DEFAULT_STANDUP.days.slice(); changed = true; }
     if (typeof STATE.standup.hour !== "number") { STATE.standup.hour = DEFAULT_STANDUP.hour; changed = true; }
     if (typeof STATE.standup.minute !== "number") { STATE.standup.minute = DEFAULT_STANDUP.minute; changed = true; }
@@ -1178,6 +1241,8 @@
       if (standupStateKey(next) !== standupStateKey(standupOverlayState)) {
         standupOverlayState = next;
         render();
+      } else if (annStateKey() !== annLastKey) {
+        render();
       }
     }, 1000);
   }
@@ -1226,6 +1291,7 @@
       const clock = (m>0 ? (m+":"+pad2(sec)) : String(sec));
       return (
         '<div class="standup-overlay">'+decor+
+          '<button class="standup-dismiss" onclick="App.ackStandup()">Dismiss ✕</button>'+
           '<div class="kiosk-eyebrow" style="color:#08222c;">Coming up</div>'+
           '<h2>Stand-up Meeting</h2>'+
           '<div class="standup-timer num">'+clock+'</div>'+
@@ -1236,6 +1302,7 @@
     if (s.phase === "blinking") {
       return (
         '<div class="standup-overlay blinking">'+decor+
+          '<button class="standup-dismiss" onclick="App.ackStandup()">Dismiss ✕</button>'+
           '<h2>Stand-up Meeting</h2>'+
           '<div class="standup-timer num">NOW</div>'+
         '</div>'
@@ -1247,6 +1314,113 @@
         '<h2 style="font-size:clamp(30px,7vw,58px);">Stand-up Meeting — Now</h2>'+
         '<div style="color:#08222c;font-size:17px;max-width:420px;">Head to the meeting point. Tap below once you’ve seen this.</div>'+
         '<button class="btn btn-primary" style="width:auto;padding:18px 34px;background:#08222c;color:#fff;" onclick="App.ackStandup()">Acknowledge</button>'+
+        '<button class="standup-dismiss" onclick="App.ackStandup()">Dismiss ✕</button>'+
+      '</div>'
+    );
+  }
+
+  /* ---------------- Software Update announcement ----------------
+     Manager writes a heading + short description and a "show from" date/time (e.g. Monday
+     morning). From then on it covers the whole screen on every device, survives refreshes
+     and app resets, until that person dismisses it (two taps: Dismiss -> "Yes, dismiss").
+     Once dismissed it never comes back for them. Dismissals are recorded per worker in the
+     shared state (so a reset tablet still remembers) and per device in localStorage (for
+     manager screens / tablets not yet assigned to a worker). The stand-up overlay sits on
+     top of it when both are due. */
+  let annConfirmId = null;   // id of the announcement showing the "are you sure?" step
+  let annPreviewId = null;   // manager preview (dismissing a preview records nothing)
+  let annLastKey = "none";
+  let annDraft = null;
+  let annSessionDismissed = []; // dismissed before its dismissibleFrom date: hidden only until next open
+  function annDismissibleFromTs(a){
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(a.dismissibleFrom||"")) return 0;
+    const p = a.dismissibleFrom.split("-").map(Number);
+    return new Date(p[0], p[1]-1, p[2], 0, 0, 0, 0).getTime();
+  }
+  function annIsTestPeriod(a){ return Date.now() < annDismissibleFromTs(a); }       // manager form draft, kept outside the DOM so live re-renders can't wipe it
+  function annDeviceDismissed(){ return ackGet("td_annDismissed"); }
+  function annViewerKey(){
+    const mode = getDeviceMode();
+    if (mode === "worker") { const w = getAssignedWorkerId(); return w ? "w:"+w : null; }
+    if (mode === "manager") { const m = getMgrIdentity(); return m ? "m:"+m : null; }
+    return null;
+  }
+  function annShowFromTs(a){
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(a.showFrom||"") ? a.showFrom : dateOnlyStr(a.createdAt||new Date());
+    const t = /^\d{2}:\d{2}$/.test(a.showTime||"") ? a.showTime : "00:00";
+    const p = d.split("-").map(Number), q = t.split(":").map(Number);
+    return new Date(p[0], p[1]-1, p[2], q[0], q[1], 0, 0).getTime();
+  }
+  function annIsDismissed(a){
+    if (annSessionDismissed.indexOf(a.id) > -1) return true;
+    if (annIsTestPeriod(a)) return false; // nothing recorded counts before the dismissible date
+    if (annDeviceDismissed().indexOf(a.id) > -1) return true;
+    const k = annViewerKey();
+    return !!(k && a.dismissedBy && a.dismissedBy[k]);
+  }
+  function currentAnnouncement(){
+    if (!STATE || !Array.isArray(STATE.announcements)) return null;
+    if (annPreviewId) { const pa = STATE.announcements.find(function(a){ return a.id===annPreviewId; }); if (pa) return pa; annPreviewId = null; }
+    if (!getDeviceMode()) return null; // let the device be set up first
+    if (getDeviceMode() === "worker" && !getAssignedWorkerId()) return null; // ...and a worker picked, so their dismissal is saved to their name
+    const now = Date.now();
+    const due = STATE.announcements.filter(function(a){
+      return a && a.active !== false && annShowFromTs(a) <= now && !annIsDismissed(a);
+    }).sort(function(a,b){ return annShowFromTs(a) - annShowFromTs(b); });
+    return due[0] || null; // oldest first; the next one shows after this one is dismissed
+  }
+  function annStateKey(){ const a = currentAnnouncement(); return a ? a.id+":"+(annConfirmId===a.id?1:0)+":"+(a.heading||"")+":"+(a.body||"") : "none"; }
+  function annOverlayHtml(){
+    const a = currentAnnouncement();
+    annLastKey = a ? annStateKey() : "none";
+    if (!a) return "";
+    const ink = "#3B1E08";
+    const decor =
+      // gear (top-left)
+      '<svg class="ann-svg" style="top:20px;left:20px;width:86px;height:86px;" viewBox="0 0 100 100" aria-hidden="true"><g fill="none" stroke="'+ink+'" stroke-width="4">'+
+        '<circle cx="50" cy="50" r="22"/><circle cx="50" cy="50" r="8" fill="'+ink+'"/>'+
+        [0,45,90,135,180,225,270,315].map(function(r){ return '<rect x="47" y="6" width="6" height="16" rx="2" transform="rotate('+r+' 50 50)"/>'; }).join("")+
+      '</g></svg>'+
+      // refresh / update arrows (top-right)
+      '<svg class="ann-svg" style="top:6%;right:5%;width:120px;height:120px;" viewBox="0 0 100 100" aria-hidden="true"><g fill="none" stroke="'+ink+'" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">'+
+        '<path d="M80 40 A32 32 0 0 0 22 32"/><path d="M20 60 A32 32 0 0 0 78 68"/>'+
+        '<path d="M22 16 V32 H38"/><path d="M78 84 V68 H62"/>'+
+      '</g></svg>'+
+      // cloud with download arrow (bottom-left)
+      '<svg class="ann-svg" style="bottom:22px;left:5%;width:150px;height:110px;" viewBox="0 0 150 110" aria-hidden="true"><g fill="none" stroke="'+ink+'" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">'+
+        '<path d="M40 70 H30 A20 20 0 0 1 32 30 A30 30 0 0 1 90 22 A24 24 0 0 1 118 70 H110"/>'+
+        '<path d="M75 46 V98"/><path d="M60 84 L75 99 L90 84"/>'+
+      '</g></svg>'+
+      // small gear (bottom-right)
+      '<svg class="ann-svg" style="bottom:20px;right:20px;width:76px;height:76px;" viewBox="0 0 100 100" aria-hidden="true"><g fill="none" stroke="'+ink+'" stroke-width="4">'+
+        '<circle cx="50" cy="50" r="16"/><circle cx="50" cy="50" r="6" fill="'+ink+'"/>'+
+        [0,60,120,180,240,300].map(function(r){ return '<rect x="47" y="4" width="6" height="14" rx="2" transform="rotate('+r+' 50 50)"/>'; }).join("")+
+      '</g></svg>'+
+      // circuit trace (mid-left)
+      '<svg class="ann-svg" style="top:38%;left:3%;width:22%;height:60px;" viewBox="0 0 220 60" preserveAspectRatio="none" aria-hidden="true"><g fill="none" stroke="'+ink+'" stroke-width="3">'+
+        '<path d="M0 30 H60 V10 H140 V50 H220"/><circle cx="60" cy="30" r="4" fill="'+ink+'" stroke="none"/><circle cx="140" cy="10" r="4" fill="'+ink+'" stroke="none"/><circle cx="140" cy="50" r="4" fill="'+ink+'" stroke="none"/>'+
+      '</g></svg>'+
+      // progress bar (lower-right)
+      '<svg class="ann-svg" style="bottom:120px;right:6%;width:26%;height:34px;" viewBox="0 0 260 34" preserveAspectRatio="none" aria-hidden="true">'+
+        '<rect x="2" y="2" width="256" height="30" rx="15" fill="none" stroke="'+ink+'" stroke-width="4"/><rect x="10" y="10" width="170" height="14" rx="7" fill="'+ink+'"/>'+
+      '</svg>';
+    const preview = annPreviewId === a.id;
+    const actions = annConfirmId === a.id
+      ? '<div class="ann-confirm">'+
+          '<div style="font-weight:700;font-size:19px;">Dismiss this announcement?</div>'+
+          '<div style="font-size:15px;">'+(preview ? 'This is a preview — nothing will be recorded.'
+            : annIsTestPeriod(a) ? 'Testing until '+escapeHtml(fmtDateShort(new Date(annDismissibleFromTs(a))))+' — it will show again next time the app opens.'
+            : 'It won’t be shown to you again.')+'</div>'+
+          '<div class="row"><button class="ann-btn primary" onclick="App.confirmDismissAnnouncement(\''+a.id+'\')">Yes, dismiss</button>'+
+          '<button class="ann-btn ghost" onclick="App.cancelDismissAnnouncement()">No, keep it</button></div>'+
+        '</div>'
+      : '<button class="ann-btn primary" onclick="App.askDismissAnnouncement(\''+a.id+'\')">Dismiss</button>';
+    return (
+      '<div class="ann-overlay" role="dialog" aria-modal="true" aria-label="Software update announcement">'+decor+
+        '<div class="kiosk-eyebrow" style="position:relative;z-index:1;">'+(preview?'Preview · ':'')+'Software Update</div>'+
+        '<div class="ann-heading">'+escapeHtml(a.heading||"Software Update")+'</div>'+
+        (a.body ? '<div class="ann-body">'+escapeHtml(a.body)+'</div>' : '')+
+        actions+
       '</div>'
     );
   }
@@ -2041,6 +2215,7 @@
       html = renderTopbar("worker") + renderMessageArea() + renderWorker();
     }
     if (toastMsg) html += '<div class="toast">'+escapeHtml(toastMsg)+'</div>';
+    html += annOverlayHtml();
     html += standupOverlayHtml();
     const scrollState = captureScrollState();
     let activeState = null;
@@ -3032,7 +3207,8 @@
     const optWorker = scanIsManagerView() ? null : findWorker(getAssignedWorkerId());
     function opt(t){
       const bg = optWorker ? taskColorBg(optWorker.id, t.id) : null;
-      return '<option value="'+t.id+'"'+(selected===t.id?' selected':'')+(bg?' style="background:'+bg+';color:#151C18;"':'')+'>'+escapeHtml(t.name)+'</option>';
+      const star = (optWorker && lockedColorFor(optWorker, t.id)) ? '★ ' : '';
+      return '<option value="'+t.id+'"'+(selected===t.id?' selected':'')+(bg?' style="background:'+bg+';color:#151C18;"':'')+'>'+star+escapeHtml(t.name)+'</option>';
     }
     let h = "";
     if (withSpecial) {
@@ -3077,6 +3253,8 @@
     const f = scanForm;
     const me = mgr ? null : findWorker(getAssignedWorkerId());
     if (!mgr && !f.touched && !f.task) { const d = scanDefaultTaskId(me); if (d) f.task = d; }
+    // Only mark the box with a coloured stripe. Tinting the whole <select> makes Android's
+    // dropdown paint EVERY item in that colour, not just the highlighted task.
     const selBg = (me && f.task && f.task !== "__fault__") ? taskColorBg(me.id, f.task) : null;
     const isFault = f.task === "__fault__", linked = !!f.task && !isFault;
     const taskName = linked ? scanTaskName(f.task) : "";
@@ -3106,7 +3284,7 @@
       '<div class="k-card">'+
         '<h2>Start a new list</h2>'+
         '<div class="k-row">'+
-          '<div><label for="scanNewTask">Task</label><select id="scanNewTask"'+(selBg?' style="background:'+selBg+';color:#151C18;"':'')+' onchange="App.setScanForm(\'task\',this.value)">'+scanTaskOptionsHtml(f.task, true)+'</select></div>'+
+          '<div><label for="scanNewTask">Task</label><select id="scanNewTask"'+(selBg?' style="border-left:12px solid '+selBg+';"':'')+' onchange="App.setScanForm(\'task\',this.value)">'+scanTaskOptionsHtml(f.task, true)+'</select></div>'+
           ownerHtml+
         '</div>'+
         '<div class="k-row">'+
@@ -3937,6 +4115,51 @@
       '</div>'
     );
   }
+  function nextMondayStr(){
+    const d = new Date(); const dow = d.getDay();
+    const add = dow === 1 ? 0 : ((8 - dow) % 7 || 7);
+    d.setDate(d.getDate() + add); return dateOnlyStr(d);
+  }
+  function announcementSection(){
+    if (!annDraft) annDraft = { heading:"", body:"", showFrom: nextMondayStr(), showTime:"06:00" };
+    const d = annDraft;
+    const people = function(a){
+      return Object.keys(a.dismissedBy||{}).filter(function(k){ return k.indexOf("w:")===0; })
+        .map(function(k){ const w = findWorker(k.slice(2)); return w ? w.name : null; }).filter(Boolean);
+    };
+    const list = (STATE.announcements||[]).slice().sort(function(a,b){ return annShowFromTs(b)-annShowFromTs(a); }).map(function(a){
+      const seen = people(a);
+      const total = activeWorkers().length;
+      const live = annShowFromTs(a) <= Date.now();
+      const delAsk = ui.annDeleteId === a.id;
+      return '<div class="ann-item">'+
+        '<div style="font-weight:700;font-size:16px;">'+escapeHtml(a.heading||"(no heading)")+'</div>'+
+        (a.body?'<div style="font-size:13px;color:var(--muted);white-space:pre-line;margin-top:2px;">'+escapeHtml(a.body)+'</div>':'')+
+        '<div style="font-size:12.5px;margin-top:6px;">'+(live?'Showing since ':'Scheduled for ')+escapeHtml(a.showFrom||"")+' '+escapeHtml(a.showTime||"")+
+          (a.dismissibleFrom && annIsTestPeriod(a) ? ' · Keeps popping up until '+escapeHtml(a.dismissibleFrom) : '')+
+          ' · Dismissed by '+seen.length+' of '+total+' workers'+(seen.length?': '+escapeHtml(seen.join(", ")):'')+'</div>'+
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">'+
+          '<button class="chip-btn" onclick="App.previewAnnouncement(\''+a.id+'\')">Preview</button>'+
+          (delAsk
+            ? '<span style="display:flex;gap:6px;align-items:center;color:var(--bad);font-size:13px;">Delete for everyone? <button class="chip-btn danger" onclick="App.deleteAnnouncement(\''+a.id+'\')">Yes, delete</button><button class="chip-btn" onclick="App.setAnnDeleteAsk(null)">Keep</button></span>'
+            : '<button class="chip-btn danger" onclick="App.setAnnDeleteAsk(\''+a.id+'\')">Delete</button>')+
+        '</div></div>';
+    }).join("");
+    return (
+      '<div class="section-title" style="margin:22px 0 8px;">Software Update Announcement</div>'+
+      '<div class="card ann-form" style="padding:14px 16px;margin-bottom:12px;">'+
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Full-screen pastel-orange notice on every tablet and dashboard. It appears from the date/time below, stays through refreshes and app resets, and goes away for each person only when they dismiss it (with a confirm step).</div>'+
+        '<div class="field"><label for="annHeading">Heading</label><input id="annHeading" type="text" data-keepfocus="1" maxlength="80" value="'+escapeHtml(d.heading)+'" placeholder="e.g. App updated — new task colours" oninput="App.setAnnDraft(\'heading\',this.value)"></div>'+
+        '<div class="field"><label for="annBody">Short description</label><textarea id="annBody" data-keepfocus="1" maxlength="400" placeholder="What changed, in a sentence or two." oninput="App.setAnnDraft(\'body\',this.value)">'+escapeHtml(d.body)+'</textarea></div>'+
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">'+
+          '<div class="field" style="margin:0;"><label for="annFrom">Show from</label><input id="annFrom" type="date" style="width:auto;" value="'+escapeHtml(d.showFrom)+'" onchange="App.setAnnDraft(\'showFrom\',this.value)"></div>'+
+          '<div class="field" style="margin:0;"><label for="annTime">Time</label><input id="annTime" type="time" style="width:auto;" value="'+escapeHtml(d.showTime)+'" onchange="App.setAnnDraft(\'showTime\',this.value)"></div>'+
+          '<button class="chip-btn" style="background:var(--accent);color:var(--accent-ink);border:none;padding:10px 16px;" onclick="App.publishAnnouncement()">Publish announcement</button>'+
+        '</div>'+
+      '</div>'+
+      list
+    );
+  }
   function standupScheduleSection(){
     const cfg = STATE.standup || DEFAULT_STANDUP;
     const dayChecks = DOWS.map(function(label, idx){
@@ -4046,6 +4269,7 @@
         ppuRows+
         serialFormatsSection()+
         standupScheduleSection()+
+        announcementSection()+
         '<div style="color:var(--muted);font-size:13px;">History is kept forever — the dashboard only changes which week or year it is summarizing.</div>'+
       '</div>'
     );
@@ -5734,6 +5958,48 @@
       }
       STATE.standup = { enabled:enabled, days:days, hour:hour, minute:minute };
       persist(false, "Stand-up schedule updated.", "Saved locally — will sync.");
+      render();
+    },
+    askDismissAnnouncement: function(id){ annConfirmId = id; render(); },
+    cancelDismissAnnouncement: function(){ annConfirmId = null; render(); },
+    confirmDismissAnnouncement: function(id){
+      annConfirmId = null;
+      if (annPreviewId === id) { annPreviewId = null; render(); return; }
+      const a = (STATE.announcements||[]).find(function(x){ return x.id===id; });
+      if (a && annIsTestPeriod(a)) { annSessionDismissed.push(id); render(); return; }
+      ackAdd("td_annDismissed", id);
+      const k = annViewerKey();
+      if (a && k) {
+        if (!a.dismissedBy || typeof a.dismissedBy !== "object") a.dismissedBy = {};
+        a.dismissedBy[k] = new Date().toISOString();
+        persist(true, null, null, true);
+      }
+      render();
+    },
+    previewAnnouncement: function(id){ annConfirmId = null; annPreviewId = id; render(); },
+    setAnnDraft: function(key, val){
+      if (!annDraft) annDraft = { heading:"", body:"", showFrom: nextMondayStr(), showTime:"06:00" };
+      annDraft[key] = val;
+    },
+    publishAnnouncement: function(){
+      const d = annDraft || {};
+      const heading = String(d.heading||"").trim(), body = String(d.body||"").trim();
+      if (!heading) { showToast("Type a heading first."); const el = document.getElementById("annHeading"); if (el) el.focus(); return; }
+      const showFrom = /^\d{4}-\d{2}-\d{2}$/.test(d.showFrom||"") ? d.showFrom : todayDateOnly();
+      const showTime = /^\d{2}:\d{2}$/.test(d.showTime||"") ? d.showTime : "00:00";
+      if (!Array.isArray(STATE.announcements)) STATE.announcements = [];
+      STATE.announcements.push({ id:uid("an"), heading:heading, body:body, showFrom:showFrom, showTime:showTime,
+        active:true, createdAt:new Date().toISOString(), createdBy:getMgrIdentity()||null, dismissedBy:{} });
+      annDraft = null;
+      persist(false, "Announcement published.", "Saved locally — will sync.");
+      render();
+    },
+    setAnnDeleteAsk: function(id){ setUi({ annDeleteId: id }); },
+    deleteAnnouncement: function(id){
+      STATE.announcements = (STATE.announcements||[]).filter(function(a){ return a.id !== id; });
+      if (annPreviewId === id) annPreviewId = null;
+      setUi({ annDeleteId: null });
+      persist(false, "Announcement deleted.", "Saved locally — will sync.");
       render();
     },
     ackStandup: function(){
