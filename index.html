@@ -391,6 +391,13 @@
   .standup-svg{position:absolute; opacity:.4; pointer-events:none;}
   @keyframes standupBlink{ 0%,49%{ background:#4FC3F7; } 50%,100%{ background:#FFFFFF; } }
   .standup-overlay.blinking{ animation: standupBlink 1s steps(1,end) 5; }
+  .imp-bar{
+    display:flex; flex-wrap:wrap; align-items:center; gap:8px; justify-content:center;
+    margin:10px auto 0; max-width:640px; padding:8px 12px; border-radius:12px;
+    background:var(--warn-soft); border:1.5px dashed var(--warn); font-size:14px;
+  }
+  .imp-bar select{padding:6px 10px; border-radius:8px; border:1.5px solid var(--line); background:var(--surface); color:var(--ink); font:inherit;}
+  .greet-title{font-family:var(--font-display); font-weight:700; font-size:clamp(40px,9vw,72px); line-height:1.05; margin:10px 0 6px;}
   .standup-dismiss{
     position:absolute; top:16px; right:16px; z-index:2; width:auto; margin:0;
     padding:12px 22px; border-radius:999px; border:2px solid #08222c; background:rgba(255,255,255,.55);
@@ -847,7 +854,17 @@
   }
   function getDeviceMode(){ try { return localStorage.getItem("td_deviceMode"); } catch(e){ return null; } }
   function setDeviceMode(m){ try { localStorage.setItem("td_deviceMode", m); } catch(e){} }
-  function getAssignedWorkerId(){ try { return localStorage.getItem("td_assignedWorkerId"); } catch(e){ return null; } }
+  // The tablet's real owner (saved on the device). A logged-in manager can temporarily act as
+  // another worker for testing ("act as"); that lives in sessionStorage only, so it ends when the
+  // app is closed or the manager logs out, and never changes who the tablet belongs to.
+  function getTabletOwnerId(){ try { return localStorage.getItem("td_assignedWorkerId"); } catch(e){ return null; } }
+  function getActAsId(){ try { return sessionStorage.getItem("td_actAs"); } catch(e){ return null; } }
+  function setActAsId(id){ try { if (id) sessionStorage.setItem("td_actAs", id); else sessionStorage.removeItem("td_actAs"); } catch(e){} }
+  function isActingAs(){ const a = getActAsId(); return !!(a && getMgrIdentity() && findWorker(a)); }
+  function getAssignedWorkerId(){ return isActingAs() ? getActAsId() : getTabletOwnerId(); }
+  // Locked tablet: the owner can't switch worker unless the manager opens the Reassignment Window.
+  function isTabletLocked(){ const w = findWorker(getTabletOwnerId()); return !!(w && w.lockedTablet); }
+  function greetingWord(){ const h = new Date().getHours(); return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening"; }
   function setAssignedWorkerId(id){
     try { if (id) localStorage.setItem("td_assignedWorkerId", id); else localStorage.removeItem("td_assignedWorkerId"); } catch(e){}
   }
@@ -976,6 +993,11 @@
     if (STATE.priorityTaskIds !== undefined) { delete STATE.priorityTaskIds; changed = true; }
     if (!STATE.managerNotices) { STATE.managerNotices = []; changed = true; }
     if (STATE.reassignUntil === undefined) { STATE.reassignUntil = null; changed = true; }
+    if (!STATE.lockedTabletSeeded) {
+      const hen = (STATE.workers||[]).find(function(w){ return String(w.name||"").trim().toLowerCase() === "hen"; });
+      if (hen) hen.lockedTablet = true;
+      STATE.lockedTabletSeeded = true; changed = true;
+    }
     if (!STATE.combos) { STATE.combos = []; changed = true; }
 
     if (STATE.comboSeedTag !== COMBO_SEED_TAG) {
@@ -1437,6 +1459,19 @@
   // can't also steal the selection out from under whatever the user is actively typing.
   let suppressFocusSteal = false;
 
+  function greetIfLocked(){
+    if (getDeviceMode() !== "worker" || isActingAs()) return;
+    const w = findWorker(getTabletOwnerId());
+    if (w && w.lockedTablet) ui = Object.assign({}, ui, { screen:"confirmOwner", taskId:null, taskPickerSelectedId:null });
+  }
+  let greetPending = true; // greet once per app open, after the first real data arrives
+  function greetOnOpen(){ if (!greetPending) return; greetPending = false; greetIfLocked(); saveUi(); }
+  let hiddenSince = 0;
+  document.addEventListener("visibilitychange", function(){
+    if (document.hidden) { hiddenSince = Date.now(); return; }
+    if (hiddenSince && Date.now() - hiddenSince >= 5*60000 && stateConfirmed) { greetIfLocked(); saveUi(); render(); }
+    hiddenSince = 0;
+  });
   async function init(){
     loadUi();
     STATE = buildDefaultState();
@@ -1481,6 +1516,7 @@
           const changed = migrateState();
           stateConfirmed = true;
           saveStatus = "saved";
+          greetOnOpen();
           render();
           maybePersistMigration(changed);
         } else if (!fromCache) {
@@ -2339,7 +2375,19 @@
   }
 
   /* ---------------- worker flow ---------------- */
-  function renderWorker(){
+  function actAsBarHtml(){
+    if (!getMgrIdentity()) return "";
+    const owner = findWorker(getTabletOwnerId());
+    const cur = isActingAs() ? getActAsId() : "";
+    const opts = '<option value="">'+(owner ? 'Tablet owner ('+escapeHtml(owner.name)+')' : '— Tablet owner —')+'</option>'+
+      activeWorkers().map(function(w){ return '<option value="'+w.id+'"'+(cur===w.id?' selected':'')+'>'+escapeHtml(w.name)+'</option>'; }).join("");
+    return '<div class="shell" style="padding-top:0;padding-bottom:0;"><div class="imp-bar">'+
+      '<span>🧪 <b>Manager test mode</b> — act as</span><select onchange="App.setActAs(this.value)">'+opts+'</select>'+
+      (cur ? '<button class="chip-btn" onclick="App.setActAs(\'\')">Stop</button>' : '')+
+      '</div></div>';
+  }
+  function renderWorker(){ return actAsBarHtml() + renderWorkerScreen(); }
+  function renderWorkerScreen(){
     const assignedId = getAssignedWorkerId();
     let screen = ui.screen;
     if (!assignedId && screen !== "pickOwner") screen = "pickOwner";
@@ -2386,16 +2434,29 @@
       '</div>'
     );
   }
+  function greetingBody(w){
+    const switchLink = (isReassignOpen() && !isActingAs())
+      ? '<button class="link-btn" onclick="App.changeOwner()">Not '+escapeHtml(w.name)+'? Switch worker</button>' : '';
+    return (
+      '<div class="kiosk-eyebrow">'+escapeHtml(fmtDateShort(new Date()))+'</div>'+
+      '<div class="greet-title">'+greetingWord()+', '+escapeHtml(w.name)+'</div>'+
+      '<div class="kiosk-body" style="margin-top:18px;">'+
+        '<button class="btn btn-primary" onclick="App.goto(\'pickTask\')">Dismiss</button>'+
+        switchLink+
+      '</div>'
+    );
+  }
   function confirmOwnerBody(workerId){
     const w = findWorker(workerId);
-    if (!w) { setAssignedWorkerId(null); return pickOwnerBody(); }
+    if (!w) { if (!isActingAs()) setAssignedWorkerId(null); return pickOwnerBody(); }
+    if (w.lockedTablet) return greetingBody(w);
     return (
       '<div class="kiosk-eyebrow">Quick check</div>'+
       '<div class="kiosk-title">Hi '+escapeHtml(w.name)+', is this you?</div>'+
       '<div class="kiosk-sub">Confirm it’s your tablet before logging today’s numbers.</div>'+
       '<div class="kiosk-body">'+
         '<button class="btn btn-primary" onclick="App.goto(\'pickTask\')">Yes, that’s me</button>'+
-        '<button class="btn btn-ghost" onclick="App.changeOwner()">Not me — change worker</button>'+
+        (isActingAs() ? '' : '<button class="btn btn-ghost" onclick="App.changeOwner()">Not me — change worker</button>')+
         '<button class="link-btn" onclick="App.goto(\'retestBoard\')">Retest a board</button>'+
         '<button class="link-btn" onclick="App.gotoScanLists()">📦 Scan List</button>'+
       '</div>'
@@ -2508,9 +2569,11 @@
     }
     const owner = findWorker(getAssignedWorkerId());
     const pinnedIds = (owner && Array.isArray(owner.pinnedTasks)) ? owner.pinnedTasks : [];
-    const switchLink = isReassignOpen()
+    const switchLink = (isReassignOpen() && !isActingAs())
       ? '<button class="link-btn" onclick="App.changeOwner()">Not '+escapeHtml(owner?owner.name:"")+'? Switch worker</button>'
       : "";
+    // Locked tablets skip the confirm screen (greeting instead), so Retest lives here for them.
+    const retestLink = (owner && owner.lockedTablet) ? '<button class="link-btn" onclick="App.goto(\'retestBoard\')">Retest a board</button>' : "";
     const selectedId = ui.taskPickerSelectedId || "";
     const listRows = tasks.map(function(t){
       const pinned = pinnedIds.indexOf(t.id) > -1;
@@ -2544,6 +2607,7 @@
         '<div class="card" id="taskPickerList" data-scroll-keep style="max-height:320px;overflow-y:auto;text-align:left;padding:4px;">'+listRows+'</div>'+
         '<button class="btn btn-primary" onclick="App.pickTask()"'+(selectedId?'':' disabled')+'>Next</button>'+
         '<button class="btn btn-ghost" onclick="App.gotoScanLists()">📦 Scan List</button>'+
+        retestLink+
         switchLink+
       '</div>'+
       myEntriesSection(owner)
@@ -4098,8 +4162,9 @@
   function managerWorkersPanel(){
     const rows = STATE.workers.map(function(w){
       return (
-        '<div class="list-row"><div class="name">'+escapeHtml(w.name)+(w.active?'':' <span class="inactive-tag">(hidden)</span>')+'</div>'+
+        '<div class="list-row"><div class="name">'+escapeHtml(w.name)+(w.active?'':' <span class="inactive-tag">(hidden)</span>')+(w.lockedTablet?' <span class="inactive-tag" style="color:var(--ink);">🔒 locked tablet</span>':'')+'</div>'+
         '<div class="actions">'+
+          '<button class="chip-btn'+(w.lockedTablet?' chip-active':'')+'" title="Locked: the tablet shows a greeting and can only switch worker while the Reassignment Window is open" onclick="App.toggleWorkerLock(\''+w.id+'\')">'+(w.lockedTablet?'🔒 Unlock tablet':'🔓 Lock tablet')+'</button>'+
           '<button class="chip-btn" onclick="App.toggleWorker(\''+w.id+'\')">'+(w.active?'Hide':'Unhide')+'</button>'+
         '</div></div>'
       );
@@ -4646,7 +4711,21 @@
       setAssignedWorkerId(sel.value);
       setUi({ screen:"pickTask", taskPickerSelectedId:null });
     },
-    changeOwner: function(){ setAssignedWorkerId(null); setUi({ screen:"pickOwner" }); },
+    changeOwner: function(){
+      if (isTabletLocked() && !isReassignOpen()) { showToast("This tablet is locked — ask the manager to open the Reassignment Window."); return; }
+      setAssignedWorkerId(null); setUi({ screen:"pickOwner" });
+    },
+    setActAs: function(id){
+      if (!getMgrIdentity()) { setActAsId(null); render(); return; }
+      setActAsId(id && findWorker(id) ? id : null);
+      setUi({ screen:"confirmOwner", taskId:null, taskPickerSelectedId:null, scanListId:null, colorPickTaskId:null });
+    },
+    toggleWorkerLock: function(id){
+      const w = findWorker(id); if (!w) return;
+      w.lockedTablet = !w.lockedTablet;
+      persist(false, w.name+(w.lockedTablet?"’s tablet is now locked.":"’s tablet is unlocked."), "Saved locally — will sync.");
+      render();
+    },
     selectPickTask: function(taskId){ setUi({ taskPickerSelectedId: taskId }); },
     // Pinned-shortcut tap: skips the task picker entirely and goes straight to "made".
     pickTaskShortcut: function(taskId){
@@ -5096,7 +5175,7 @@
       if (match) { setMgrIdentity(match.id); setUi({ pinError:false, mScreen:"dashboard" }); }
       else setUi({ pinError:true });
     },
-    logoutManager: function(){ setMgrIdentity(null); setUi({ mScreen:"dashboard" }); },
+    logoutManager: function(){ setMgrIdentity(null); setActAsId(null); setUi({ mScreen:"dashboard" }); },
     /* ---- Scan List actions ---- */
     setScanForm: function(name, val, noRender){
       scanForm[name] = val;
