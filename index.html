@@ -258,6 +258,17 @@
     padding:10px 4px; border-bottom:1px solid var(--line);
   }
   .list-row:last-child{border-bottom:none;}
+  /* Task highlights (per-worker favourite colours + locked highlights). Pastel backgrounds
+     always use dark ink so they read the same in light and dark mode. */
+  .hl{color:#151C18 !important; border-radius:10px;}
+  .hl .hl-sub{color:#4A5550 !important;}
+  .list-row.hl{margin:3px 0; padding:10px 10px; border-bottom-color:transparent;}
+  .list-row.is-sel{outline:3px solid var(--ink); outline-offset:-3px; border-radius:10px;}
+  .hl-lock{font-size:11px; font-weight:700; opacity:.75; white-space:nowrap;}
+  .swatch-row{display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px 10px 12px;}
+  .swatch{width:38px; height:38px; border-radius:50%; border:2px solid rgba(0,0,0,.15); cursor:pointer; padding:0;}
+  .swatch.on{border:3px solid var(--ink);}
+  .swatch.none{background:transparent; color:var(--muted); font-size:16px; border-style:dashed;}
   .list-row .name{font-weight:600;}
   .list-row .actions{display:flex; gap:8px; flex-wrap:wrap;}
   /* ---------- Scan List (design ported from the Scan List Keeper app; scoped under .slk) ---------- */
@@ -666,6 +677,23 @@
   // before that task has synced down keeps retrying on every subsequent load instead of
   // silently giving up.
   const FINAL_ASSY_TASK_NAME = "7000AI Final Assy";
+  // Task highlight colours (pastels only). Workers pick these for their favourite tasks
+  // in the task picker; it only colours the row, it never changes the order.
+  const PASTELS = [
+    { key:"pink",     label:"Pink",     bg:"#F9D5DD" },
+    { key:"peach",    label:"Peach",    bg:"#FCDCC4" },
+    { key:"yellow",   label:"Yellow",   bg:"#FFF3A8" },
+    { key:"mint",     label:"Mint",     bg:"#CDEFD9" },
+    { key:"aqua",     label:"Aqua",     bg:"#C6EEEA" },
+    { key:"sky",      label:"Sky",      bg:"#CFE4FA" },
+    { key:"lavender", label:"Lavender", bg:"#E1D8F7" }
+  ];
+  // Locked highlights set by the manager: always shown for that worker, can't be changed
+  // by them, and the colour is reserved (hidden from their own palette) so it stays unique.
+  // The task also becomes that worker's default (first) task when starting a Scan List.
+  const LOCKED_HIGHLIGHTS = [
+    { worker:"kim", task:FINAL_ASSY_TASK_NAME, color:"yellow" }
+  ];
   const FINAL_ASSY_SEED_TAG = "v1-final-assy-serialtask-1";
   const TOUCHUP_PARTS = {
     "7000-03+01 main board touch-up": 20,
@@ -861,6 +889,7 @@
     // picker) — see pickTaskBody()/toggleWorkerTaskPin().
     STATE.workers.forEach(function(w){
       if (!Array.isArray(w.pinnedTasks)) { w.pinnedTasks = []; changed = true; }
+      if (!w.taskColors || typeof w.taskColors !== "object") { w.taskColors = {}; changed = true; }
     });
     if (!STATE.scanLists) { STATE.scanLists = []; changed = true; }
     if (!STATE.entries) { STATE.entries = []; changed = true; }
@@ -1500,6 +1529,43 @@
   function activeWorkers(){ return STATE.workers.filter(function(w){ return w.active; }); }
   function findTask(id){ return STATE.tasks.find(function(t){ return t.id===id; }); }
   function findWorker(id){ return STATE.workers.find(function(w){ return w.id===id; }); }
+  function pastelByKey(k){ return PASTELS.find(function(p){ return p.key===k; }) || null; }
+  function lockedRulesFor(worker){
+    if (!worker) return [];
+    const n = String(worker.name||"").trim().toLowerCase();
+    return LOCKED_HIGHLIGHTS.filter(function(r){ return r.worker === n; });
+  }
+  function lockedTaskIdOf(rule){
+    const key = rule.task.trim().toLowerCase();
+    const t = STATE.tasks.find(function(x){
+      return x.name.trim().toLowerCase()===key || (x.aliases||[]).some(function(a){ return String(a).trim().toLowerCase()===key; });
+    });
+    return t ? t.id : null;
+  }
+  function lockedColorFor(worker, taskId){
+    const r = lockedRulesFor(worker).find(function(r){ return lockedTaskIdOf(r) === taskId; });
+    return r ? r.color : null;
+  }
+  // Pastels this worker may choose from (their reserved/locked colours are hidden).
+  function paletteFor(worker){
+    const reserved = lockedRulesFor(worker).map(function(r){ return r.color; });
+    return PASTELS.filter(function(p){ return reserved.indexOf(p.key) < 0; });
+  }
+  function taskColorKey(workerId, taskId){
+    const w = workerId ? findWorker(workerId) : null;
+    if (!w || !taskId) return null;
+    const locked = lockedColorFor(w, taskId);
+    if (locked) return locked;
+    const k = w.taskColors ? w.taskColors[taskId] : null;
+    return paletteFor(w).some(function(p){ return p.key===k; }) ? k : null;
+  }
+  function taskColorBg(workerId, taskId){ const p = pastelByKey(taskColorKey(workerId, taskId)); return p ? p.bg : null; }
+  // Worker's default Scan List task (from a locked highlight), if any.
+  function scanDefaultTaskId(worker){
+    const rules = lockedRulesFor(worker);
+    for (let i=0;i<rules.length;i++){ const id = lockedTaskIdOf(rules[i]); const t = id && findTask(id); if (t && t.active) return id; }
+    return null;
+  }
 
   /* ---------------- Fault Log traceability (Feature: test-task fault boards) ---------------- */
   const FAULT_STATUS_LABELS = { for_repair:"For Repair", received:"Received", passed:"Passed", set_aside:"Set Aside" };
@@ -2179,7 +2245,8 @@
       const upBtn = idx>0 ? '<button type="button" class="chip-btn" style="padding:3px 9px;" title="Move up" onclick="App.moveWorkerShortcut('+idx+',-1)">▲</button>' : "";
       const downBtn = idx<pinned.length-1 ? '<button type="button" class="chip-btn" style="padding:3px 9px;" title="Move down" onclick="App.moveWorkerShortcut('+idx+',1)">▼</button>' : "";
       return '<div class="list-row">'+
-        '<button type="button" class="btn btn-ghost" style="flex:1;margin:0;text-align:left;" onclick="App.pickTaskShortcut(\''+t.id+'\')">'+escapeHtml(t.name)+'</button>'+
+        (function(){ const bg = taskColorBg(owner.id, t.id);
+          return '<button type="button" class="btn btn-ghost'+(bg?' hl':'')+'" style="flex:1;margin:0;text-align:left;'+(bg?'background:'+bg+';':'')+'" onclick="App.pickTaskShortcut(\''+t.id+'\')">'+escapeHtml(t.name)+'</button>'; })()+
         '<div class="actions" style="gap:4px;">'+upBtn+downBtn+
           '<button type="button" class="chip-btn danger" style="padding:3px 9px;" title="Unpin" onclick="App.toggleWorkerTaskPin(\''+t.id+'\')">✕</button>'+
         '</div></div>';
@@ -2221,8 +2288,9 @@
       const t = findTask(e.taskId);
       const mgr = e.enteredByManager ? (STATE.managers||[]).find(function(m){ return m.id===e.enteredByManager; }) : null;
       const whoTag = mgr ? (' · entered by '+escapeHtml(mgr.name)) : "";
-      return '<div class="list-row"><div><div>'+escapeHtml(t?t.name:"(removed task)")+'</div>'+
-        '<div style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · '+escapeHtml(e.entryDate||"")+whoTag+' · '+fmtRelTime(e.ts)+'</div></div></div>';
+      const ebg = t ? taskColorBg(owner.id, t.id) : null;
+      return '<div class="list-row'+(ebg?' hl':'')+'"'+(ebg?' style="background:'+ebg+';padding-left:10px;padding-right:10px;"':'')+'><div><div>'+escapeHtml(t?t.name:"(removed task)")+'</div>'+
+        '<div class="hl-sub" style="font-size:12px;color:var(--muted);">'+e.made+' made / '+e.faults+' faults · '+escapeHtml(e.entryDate||"")+whoTag+' · '+fmtRelTime(e.ts)+'</div></div></div>';
     }).join("");
 
     const totalMade = list.reduce(function(s,e){ return s+Math.max(0,e.made); }, 0);
@@ -2273,7 +2341,22 @@
       const pinned = pinnedIds.indexOf(t.id) > -1;
       const selected = selectedId === t.id;
       const pinBtn = '<button type="button" class="chip-btn'+(pinned?' chip-active':'')+'" style="padding:4px 9px;font-size:12px;" title="'+(pinned?'Unpin from shortcuts':'Pin to shortcuts')+'" onclick="event.stopPropagation();App.toggleWorkerTaskPin(\''+t.id+'\')">'+(pinned?'📌':'📌 Pin')+'</button>';
-      return '<div class="list-row" style="cursor:pointer;'+(selected?'background:var(--surface-2);':'')+'" onclick="App.selectPickTask(\''+t.id+'\')"><div>'+escapeHtml(t.name)+'</div><div class="actions">'+pinBtn+'</div></div>';
+      const bg = owner ? taskColorBg(owner.id, t.id) : null;
+      const locked = owner ? !!lockedColorFor(owner, t.id) : false;
+      const colorBtn = !owner ? "" : locked
+        ? '<span class="hl-lock" title="Highlight set by the manager">★</span>'
+        : '<button type="button" class="chip-btn'+(ui.colorPickTaskId===t.id?' chip-active':'')+'" style="padding:4px 9px;font-size:12px;" title="Highlight colour" onclick="event.stopPropagation();App.toggleTaskColorPicker(\''+t.id+'\')">🎨</button>';
+      const cls = 'list-row'+(bg?' hl':'')+(selected?' is-sel':'');
+      const style = 'cursor:pointer;'+(bg?'background:'+bg+';':(selected?'background:var(--surface-2);':''));
+      let row = '<div class="'+cls+'" style="'+style+'" onclick="App.selectPickTask(\''+t.id+'\')"><div>'+escapeHtml(t.name)+'</div><div class="actions">'+colorBtn+pinBtn+'</div></div>';
+      if (owner && !locked && ui.colorPickTaskId === t.id) {
+        const cur = taskColorKey(owner.id, t.id);
+        row += '<div class="swatch-row" onclick="event.stopPropagation()">'+
+          paletteFor(owner).map(function(p){ return '<button type="button" class="swatch'+(cur===p.key?' on':'')+'" style="background:'+p.bg+';" title="'+p.label+'" aria-label="'+p.label+'" onclick="App.setTaskColor(\''+t.id+'\',\''+p.key+'\')"></button>'; }).join("")+
+          '<button type="button" class="swatch none'+(cur?'':' on')+'" title="No colour" aria-label="No colour" onclick="App.setTaskColor(\''+t.id+'\',\'\')">✕</button>'+
+        '</div>';
+      }
+      return row;
     }).join("") +
       '<div class="list-row" style="cursor:pointer;'+(selectedId==="__other__"?'background:var(--surface-2);':'')+'" onclick="App.selectPickTask(\'__other__\')"><div>Other job not in the list</div></div>';
     return (
@@ -2935,6 +3018,10 @@
   function scanSafeName(s){ return String(s||"").replace(/[^\w\- ]+/g,"").trim().replace(/\s+/g,"_").slice(0,40) || "list"; }
 
   /* ---- screens ---- */
+  function scanTaskChip(l, tn){
+    const bg = (l.ownerType==="worker") ? taskColorBg(l.ownerId, l.assignedTaskId||l.taskId) : null;
+    return '<span class="k-chip task'+(bg?' hl':'')+'"'+(bg?' style="background:'+bg+';"':'')+'>'+escapeHtml(tn)+'</span>';
+  }
   function scanShell(inner){ return '<div class="slk"><main class="slk-main">'+inner+'</main></div>'; }
   function scanBackBar(){
     if (scanIsManagerView()) return '<div style="margin-bottom:10px;"><button class="chip-btn" onclick="App.closeCameraAndDashboard()">← Back to dashboard</button></div>';
@@ -2942,16 +3029,24 @@
   }
   function scanTaskOptionsHtml(selected, withSpecial){
     const tasks = activeTasks().slice().sort(function(a,b){ return a.name.localeCompare(b.name); });
+    const optWorker = scanIsManagerView() ? null : findWorker(getAssignedWorkerId());
+    function opt(t){
+      const bg = optWorker ? taskColorBg(optWorker.id, t.id) : null;
+      return '<option value="'+t.id+'"'+(selected===t.id?' selected':'')+(bg?' style="background:'+bg+';color:#151C18;"':'')+'>'+escapeHtml(t.name)+'</option>';
+    }
     let h = "";
     if (withSpecial) {
+      const defId = scanDefaultTaskId(optWorker);
+      const defTask = defId ? findTask(defId) : null;
+      if (defTask) h += '<optgroup label="My task">'+opt(defTask)+'</optgroup>';
       h += '<option value=""'+(selected===""?' selected':'')+'>— No task (stand-alone list) —</option>';
       h += '<option value="__fault__"'+(selected==="__fault__"?' selected':'')+'>⚠ Faulty boards (assign to a task at the end)</option>';
       const owner = scanIsManagerView() ? null : findWorker(getAssignedWorkerId());
       const pins = (owner && owner.pinnedTasks ? owner.pinnedTasks : []).map(findTask).filter(Boolean);
-      if (pins.length) h += '<optgroup label="My shortcuts">'+pins.map(function(t){ return '<option value="'+t.id+'"'+(selected===t.id?' selected':'')+'>'+escapeHtml(t.name)+'</option>'; }).join("")+'</optgroup>';
+      if (pins.length) h += '<optgroup label="My shortcuts">'+pins.map(opt).join("")+'</optgroup>';
       h += '<optgroup label="All tasks">';
     }
-    h += tasks.map(function(t){ return '<option value="'+t.id+'"'+(selected===t.id?' selected':'')+'>'+escapeHtml(t.name)+'</option>'; }).join("");
+    h += tasks.map(opt).join("");
     if (withSpecial) h += '</optgroup>';
     return h;
   }
@@ -2980,6 +3075,9 @@
   function scanNewFormHtml(){
     const mgr = scanIsManagerView();
     const f = scanForm;
+    const me = mgr ? null : findWorker(getAssignedWorkerId());
+    if (!mgr && !f.touched && !f.task) { const d = scanDefaultTaskId(me); if (d) f.task = d; }
+    const selBg = (me && f.task && f.task !== "__fault__") ? taskColorBg(me.id, f.task) : null;
     const isFault = f.task === "__fault__", linked = !!f.task && !isFault;
     const taskName = linked ? scanTaskName(f.task) : "";
     let ownerHtml = "";
@@ -3008,7 +3106,7 @@
       '<div class="k-card">'+
         '<h2>Start a new list</h2>'+
         '<div class="k-row">'+
-          '<div><label for="scanNewTask">Task</label><select id="scanNewTask" onchange="App.setScanForm(\'task\',this.value)">'+scanTaskOptionsHtml(f.task, true)+'</select></div>'+
+          '<div><label for="scanNewTask">Task</label><select id="scanNewTask"'+(selBg?' style="background:'+selBg+';color:#151C18;"':'')+' onchange="App.setScanForm(\'task\',this.value)">'+scanTaskOptionsHtml(f.task, true)+'</select></div>'+
           ownerHtml+
         '</div>'+
         '<div class="k-row">'+
@@ -3059,7 +3157,7 @@
       return '<div class="k-li" onclick="App.openScanList(\''+l.id+'\')">'+
         (mgr?'<input type="checkbox" style="width:22px;height:22px;flex:0 0 auto;" '+(sel.indexOf(l.id)>-1?'checked ':'')+'onclick="event.stopPropagation();App.toggleScanSel(\''+l.id+'\')">':'')+
         '<div class="main"><div class="t">'+escapeHtml(l.title||"Untitled")+
-          (tn?'<span class="k-chip task">'+escapeHtml(tn)+'</span>':'')+
+          (tn?scanTaskChip(l, tn):'')+
           (l.kind==="fault"?'<span class="k-chip fault">Faulty boards'+(l.assignedTaskId?' → assigned':'')+'</span>':'')+
           (scanIsTestList(l)?'<span class="k-chip test">TEST</span>':'')+
           (closed?'<span class="k-chip closed">Finished</span>':'')+
@@ -3197,7 +3295,7 @@
       banner+dupBox+
       '<div class="k-card">'+
         '<div class="k-lhead"><div class="info"><div class="title">'+escapeHtml(l.title||"Untitled")+
-          (tn?'<span class="k-chip task">'+escapeHtml(tn)+'</span>':'')+(l.kind==="fault"?'<span class="k-chip fault">Faulty boards</span>':'')+
+          (tn?scanTaskChip(l, tn):'')+(l.kind==="fault"?'<span class="k-chip fault">Faulty boards</span>':'')+
           '</div><div class="meta">'+meta+'</div>'+taskLine+'</div>'+
           '<div class="k-bigcount"><b>'+items.length+'</b><span>scanned'+(scanDoubleCount(l)?(' · '+scanDoubleCount(l)+' repeat'+(scanDoubleCount(l)===1?'':'s')):'')+'</span></div></div>'+
         scanBar+statusBar+btns+
@@ -4357,6 +4455,18 @@
       persist(false, null, "Saved locally — will sync.");
       render();
     },
+    toggleTaskColorPicker: function(taskId){
+      setUi({ colorPickTaskId: ui.colorPickTaskId === taskId ? null : taskId });
+    },
+    setTaskColor: function(taskId, key){
+      const w = findWorker(getAssignedWorkerId());
+      if (!w || !findTask(taskId) || lockedColorFor(w, taskId)) return;
+      if (!w.taskColors || typeof w.taskColors !== "object") w.taskColors = {};
+      if (key && paletteFor(w).some(function(p){ return p.key===key; })) w.taskColors[taskId] = key;
+      else delete w.taskColors[taskId];
+      persist(false, null, "Saved locally — will sync.");
+      setUi({ colorPickTaskId: null });
+    },
     toggleShortcutsCollapse: function(){ setShortcutsCollapsed(!isShortcutsCollapsed()); render(); },
     toggleMyEntriesCollapse: function(){ setMyEntriesCollapsed(!isMyEntriesCollapsed()); render(); },
     setMyEntriesView: function(v){ setUi({ myEntriesView: v==="week"?"week":"day" }); },
@@ -4766,6 +4876,7 @@
     /* ---- Scan List actions ---- */
     setScanForm: function(name, val, noRender){
       scanForm[name] = val;
+      if (name === "task") scanForm.touched = true;
       if (name === "task" || (name === "notes" && ui.scanNudge && String(val).trim())) {
         ui = Object.assign({}, ui, { scanNudge:false }); saveUi(); render(); return;
       }
